@@ -1,0 +1,34 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main",
+    "presentation"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-decorations",
+    "updater:default",
+    "dialog:default",
+    "fs:allow-write-text-file",
+    "fs:allow-read-text-file",
+    "fs:allow-exists",
+    "fs:scope-home",
+    "process:default",
+    {
+      "identifier": "state-commands",
+      "commands": [
+        "get_state",
+        "set_state",
+        "open_presentation_window",
+        "close_presentation_window",
+        "list_monitors"
+      ]
+    }
+  ]
+}

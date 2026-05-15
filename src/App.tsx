@@ -89,6 +89,7 @@ interface AppSettings {
   targetMonitor?: number;
   showReferenceBox: boolean;
   referenceBoxColor: string;
+  titleSize: number;
 }
 
 const DEFAULT_PASSAGE: Verse[] = [
@@ -191,14 +192,14 @@ const SlideRenderer = ({
           {verses.length > 0 ? verses.map((verse, index) => {
             const fullRef = verse.reference.split(' ').pop() || '';
             const verseNumber = (index === 0 || verse.isNewChapter || verse.isNewPassage) ? fullRef : (fullRef.split(':')[1] || fullRef);
-            const isActive = index >= activeVerseIndex && index < activeVerseIndex + settings.verseCount;
-            const isBlurred = readingMode && !isActive;
+            const isActive = index >= activeVerseIndex && index < (activeVerseIndex + (settings.verseCount || 1));
+            const isBlurred = !isActive;
 
             return (
               <React.Fragment key={verse.id}>
                 {verse.bookHeader && (
                   <div className="w-full text-center py-16 md:py-24 opacity-40 select-none">
-                    <h2 className="text-8xl md:text-9xl font-bold uppercase tracking-widest break-words" style={{ fontFamily: activeFont.css }}>
+                    <h2 className="font-bold uppercase tracking-widest break-words" style={{ fontFamily: activeFont.css, fontSize: `${settings.titleSize || 96}px`, lineHeight: 1.1 }}>
                       {verse.bookHeader}
                     </h2>
                   </div>
@@ -219,7 +220,7 @@ const SlideRenderer = ({
                   <div className={`${settings.oneVersePerLine || verse.isNewChapter || verse.acrostic ? 'flex gap-6 items-start w-full' : 'inline'}`}>
                     {settings.showVerseNumbers && (
                       <span
-                        className={`text-[0.6em] select-none mr-2 transition-all ${isActive ? 'opacity-40' : 'opacity-10 blur-[2px]'} ${settings.oneVersePerLine || verse.isNewChapter || verse.isNewPassage || verse.acrostic ? 'mt-3 flex-shrink-0' : 'inline-block align-top mt-1'}`}
+                        className={`text-[0.6em] select-none mr-2 transition-all ${isActive ? 'opacity-40' : 'opacity-10 blur-[1px]'} ${settings.oneVersePerLine || verse.isNewChapter || verse.isNewPassage || verse.acrostic ? 'mt-3 flex-shrink-0' : 'inline-block align-top mt-1'}`}
                         style={{ color: settings.verseNumberColor, fontFamily: activeFont.css }}
                       >
                         {verseNumber}
@@ -229,8 +230,14 @@ const SlideRenderer = ({
                       id={`verse-${index}`}
                       contentEditable={isControl && !readingMode} 
                       suppressContentEditableWarning 
-                      className={`transition-all outline-none leading-relaxed ${isBlurred ? 'opacity-10 blur-[2px] scale-95' : 'opacity-100 scale-100'}`}
-                      style={{ transitionDuration: `${settings.scrollSpeed}ms` }}
+                      className="transition-all outline-none leading-relaxed"
+                      style={{ 
+                        transitionDuration: `${settings.scrollSpeed}ms`,
+                        filter: isBlurred ? 'blur(2px)' : 'none',
+                        opacity: isBlurred ? 0.4 : 1,
+                        transform: isBlurred ? 'scale(0.98)' : 'scale(1)',
+                        fontWeight: isActive ? 500 : 'inherit'
+                      }}
                       dangerouslySetInnerHTML={{ __html: (verse.html || verse.text) + (isRtl ? '' : '\u200E') }}
                     />
                   </div>
@@ -381,8 +388,19 @@ export default function App() {
   const [readingMode, setReadingMode] = useState(false);
   const [activeVerseIndex, setActiveVerseIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSlideSettings, setShowSlideSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    try {
+      const saved = localStorage.getItem('osb_pro_settings');
+      return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
+    } catch { return DEFAULT_SETTINGS; }
+  });
+
+  // Save settings whenever they change
+  useEffect(() => {
+    localStorage.setItem('osb_pro_settings', JSON.stringify(settings));
+  }, [settings]);
   const [showCustomTextModal, setShowCustomTextModal] = useState(false);
   const [customTextValue, setCustomTextValue] = useState("");
   const [referenceInput, setReferenceInput] = useState("Genesis 1:1-5");
@@ -422,13 +440,18 @@ export default function App() {
   const syncStateToStorage = useCallback((overrides: { index?: number; verses?: Verse[]; settings?: AppSettings; readingMode?: boolean; forceDomRead?: boolean } = {}) => {
     if (appMode !== 'control') return;
     
-    const targetIndex = overrides.index !== undefined ? overrides.index : stateRef.current.activeVerseIndex;
+    // We use the absolute latest values from state where possible
+    const targetIndex = overrides.index !== undefined ? overrides.index : activeVerseIndex;
     const targetReadingMode = overrides.readingMode !== undefined ? overrides.readingMode : readingMode;
-    let currentVerses = overrides.verses !== undefined ? overrides.verses : stateRef.current.verses;
-    let updatedSlides = stateRef.current.slides;
+    const targetSettings = overrides.settings || settings;
+    const targetTranslation = translation;
+    const targetSlides = slides;
+    const targetSlideIndex = currentSlideIndex;
 
-    if (overrides.forceDomRead && overrides.verses === undefined && stateRef.current.verses.length > 0) {
-      currentVerses = stateRef.current.verses.map((v, i) => {
+    let currentVerses = overrides.verses !== undefined ? overrides.verses : verses;
+
+    if (overrides.forceDomRead && overrides.verses === undefined && verses.length > 0) {
+      const updatedVerses = verses.map((v, i) => {
         const el = document.getElementById(`verse-${i}`);
         if (!el) return v;
         const html = el.innerHTML.replace(/\u200E/g, '');
@@ -436,37 +459,40 @@ export default function App() {
         return { ...v, html };
       });
       
-      const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i].html);
+      const hasChanged = updatedVerses.some((v, i) => v.html !== verses[i].html);
       if (hasChanged) {
-        setVerses(currentVerses);
-        updatedSlides = [...stateRef.current.slides];
-        if (updatedSlides[stateRef.current.currentSlideIndex]) {
-          updatedSlides[stateRef.current.currentSlideIndex] = { 
-            ...updatedSlides[stateRef.current.currentSlideIndex], 
-            content: currentVerses 
-          };
-        }
-        setSlides(updatedSlides);
+        currentVerses = updatedVerses;
+        setVerses(updatedVerses);
+        // We don't update slides here to avoid a loop, 
+        // but normally this is called from a markup tool which should handle it.
       }
     }
 
     const stateToSave = { 
-      slides: updatedSlides,
-      currentSlideIndex: stateRef.current.currentSlideIndex,
+      slides: targetSlides,
+      currentSlideIndex: targetSlideIndex,
       verses: currentVerses, 
       activeIndex: targetIndex, 
       readingMode: targetReadingMode,
-      settings: overrides.settings || stateRef.current.settings,
-      translation: stateRef.current.translation
+      settings: targetSettings,
+      translation: targetTranslation
     };
 
     try { syncChannel.postMessage(stateToSave); } catch (e) {}
     if (isTauriApp) { invoke('set_state', { state: stateToSave }).catch(() => {}); }
     try {
       localStorage.setItem('osb_pro_state', JSON.stringify(stateToSave));
-      localStorage.setItem('osb_pro_slides', JSON.stringify(updatedSlides));
+      localStorage.setItem('osb_pro_slides', JSON.stringify(targetSlides));
     } catch (e) {}
-  }, [appMode, syncChannel, isTauriApp, readingMode, verses, settings, translation, slides, currentSlideIndex]);
+  }, [appMode, syncChannel, isTauriApp, readingMode, verses, settings, translation, slides, currentSlideIndex, activeVerseIndex]);
+
+  // Automatic sync whenever state changes
+  useEffect(() => {
+    if (appMode === 'control') {
+      const timer = setTimeout(() => syncStateToStorage(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [activeVerseIndex, verses, settings, translation, slides, currentSlideIndex, readingMode, appMode, syncStateToStorage]);
 
   useEffect(() => {
     const initTauri = async () => {
@@ -772,7 +798,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [appMode, currentSlide.type, verses.length, slides.length, syncStateToStorage]);
 
+  const activeSettings = useMemo(() => {
+    return { ...settings, ...(currentSlide.settingsOverride || {}) };
+  }, [settings, currentSlide.settingsOverride]);
+
   // --- AUTO SCROLL ---
+  const scrollAnimationRef = useRef<number | null>(null);
   useEffect(() => {
     if (appMode === 'select' || verses.length === 0) return;
     
@@ -790,7 +821,7 @@ export default function App() {
     if (!firstEl) return;
 
     // Calculate center of entire active group
-    const lastIdx = Math.min(activeVerseIndex + settings.verseCount - 1, verses.length - 1);
+    const lastIdx = Math.min(activeVerseIndex + activeSettings.verseCount - 1, verses.length - 1);
     const lastEl = container.querySelector(`[data-verse-index="${lastIdx}"]`) as HTMLElement || firstEl;
 
     const groupTop = firstEl.offsetTop;
@@ -798,36 +829,45 @@ export default function App() {
     const groupHeight = groupBottom - groupTop;
     const groupCenter = groupTop + (groupHeight / 2);
     
-    // In control mode, we have a thick bottom toolbar
-    // In present mode, we have a reference box
-    // We want the text centered in the REMAINING visual space to the eye
     const chromeHeight = appMode === 'control' ? 140 : 80;
     const visualCenter = (container.clientHeight - chromeHeight) / 2;
-    
-    // Fine-tune target: slight offset upward for better visual balance
     const targetScroll = Math.max(0, groupCenter - visualCenter - 15);
     
+    // Stop any existing animation
+    if (scrollAnimationRef.current) cancelAnimationFrame(scrollAnimationRef.current);
+
     const startScroll = container.scrollTop;
     const distance = targetScroll - startScroll;
-    const duration = settings.scrollSpeed || 400; // ms
+    
+    // If distance is tiny, don't animate to avoid micro-hitches
+    if (Math.abs(distance) < 2) {
+      container.scrollTop = targetScroll;
+      return;
+    }
+
+    const duration = activeSettings.scrollSpeed || 400; 
     const startTime = performance.now();
 
     const animateScroll = (currentTime: number) => {
       const elapsed = currentTime - startTime;
       const progress = Math.min(elapsed / duration, 1);
       
-      // easeOutCubic
       const easedProgress = 1 - Math.pow(1 - progress, 3);
-
       container.scrollTop = startScroll + distance * easedProgress;
 
       if (progress < 1) {
-        requestAnimationFrame(animateScroll);
+        scrollAnimationRef.current = requestAnimationFrame(animateScroll);
+      } else {
+        scrollAnimationRef.current = null;
       }
     };
 
-    requestAnimationFrame(animateScroll);
-  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, verses, appMode]);
+    scrollAnimationRef.current = requestAnimationFrame(animateScroll);
+    
+    return () => {
+      if (scrollAnimationRef.current) cancelAnimationFrame(scrollAnimationRef.current);
+    };
+  }, [activeVerseIndex, activeSettings.scrollSpeed, activeSettings.textSize, activeSettings.textSpacing, activeSettings.verseCount, activeSettings.maxWidth, activeSettings.oneVersePerLine, activeSettings.showVerseNumbers, verses, appMode]);
 
   // --- THEME ---
   const uiTheme = settings.uiTheme || 'dark';
@@ -873,8 +913,8 @@ export default function App() {
   const fetchBiblePassage = useCallback(async (isAppend = false, overrideRef?: string, overrideTrans?: string) => {
     let refQuery = (overrideRef || referenceInput).trim();
     if (!refQuery) return;
-
-    // Expand book-only queries to Chapter 1 if only book is provided
+    
+    // Auto-complete book name to chapter 1 if only book is provided
     try {
       const lowerQuery = refQuery.toLowerCase().replace(/\./g, '');
       if (BOOK_IDS[lowerQuery]) {
@@ -888,91 +928,301 @@ export default function App() {
     setIsLoading(true);
     setFetchError(null);
     const activeTrans = overrideTrans || translation;
-
+    
     try {
-      let fetchedVerses: Verse[] = [];
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 8000);
+      let fetchedVersesRaw: {id: string, reference: string, text: string, html?: string}[] = [];
+      const getCanonicalBookName = (refStr: string) => {
+        const lastColonIdx = refStr.lastIndexOf(':');
+        const bookChap = lastColonIdx === -1 ? refStr : refStr.substring(0, lastColonIdx).trim();
+        const lastSpaceIdx = bookChap.lastIndexOf(' ');
+        const bookPart = lastSpaceIdx === -1 ? bookChap : bookChap.substring(0, lastSpaceIdx).trim();
+        const bookId = BOOK_IDS[bookPart.toLowerCase().replace(/\./g, '').trim()];
+        if (bookId && CANONICAL_BOOKS[bookId]) return CANONICAL_BOOKS[bookId];
+        return bookPart.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+      };
+
+      const getBookNameFromRef = (refStr: string) => {
+        const lastColonIdx = refStr.lastIndexOf(':');
+        if (lastColonIdx === -1) return refStr;
+        const bookChap = refStr.substring(0, lastColonIdx).trim();
+        const lastSpaceIdx = bookChap.lastIndexOf(' ');
+        if (lastSpaceIdx === -1) return bookChap;
+        return bookChap.substring(0, lastSpaceIdx).trim();
+      };
+      
+      const getChapterRange = (ref: string) => {
+        const parts = ref.split(' ');
+        const range = parts[parts.length - 1];
+        const book = parts.slice(0, parts.length - 1).join(' ');
+        return { book, range };
+      };
+
+      const { book: rawBook, range: rawRange } = getChapterRange(refQuery);
+      const canonicalBook = getCanonicalBookName(rawBook);
+      // headerName includes the chapter range, currentBookName is just the book
+      const headerName = formatReference(`${canonicalBook} ${rawRange}`);
+      const currentBookName = canonicalBook; 
+      const isBookStart = refQuery.toLowerCase().includes(' 1:1') || refQuery.toLowerCase().includes(' 1:1-');
 
       if (activeTrans === 'esv') {
-        if (!esvApiKey) throw new Error("ESV API key required.");
-        const res = await fetch(`https://api.esv.org/v3/passage/html/?q=${encodeURIComponent(refQuery)}&include-passage-references=false&include-verse-numbers=true&include-first-verse-numbers=true&include-footnotes=false&include-footnote-body=false&include-headings=false&include-short-copyright=false&include-css-link=false&inline-styles=false&include-audio-link=false`, {
-          headers: { 'Authorization': `Token ${esvApiKey}` },
-          signal: controller.signal
+        if (!esvApiKey) throw new Error("Please enter a free API key from api.esv.org.");
+        const res = await fetchWithTimeout(`https://api.esv.org/v3/passage/text/?q=${encodeURIComponent(refQuery)}&include-passage-references=false&include-footnotes=false&include-headings=false&include-short-copyright=false`, {
+          headers: { 'Authorization': `Token ${esvApiKey}` }
         });
+        if (!res.ok) throw new Error("Invalid ESV API Key or request.");
         const data = await res.json();
-        if (!data.passages || data.passages.length === 0) throw new Error("Passage not found.");
-        
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = data.passages[0];
-        const verseNodes = tempDiv.querySelectorAll('.verse-num');
-        
-        if (verseNodes.length > 0) {
-          fetchedVerses = Array.from(verseNodes).map((node, i) => {
-            const vNum = node.textContent?.trim() || "";
-            let text = "";
-            let sibling = node.nextSibling;
-            while (sibling && !((sibling as HTMLElement).classList?.contains('verse-num'))) {
-              text += sibling.textContent;
-              sibling = sibling.nextSibling;
-            }
-            return {
-              id: `esv-${refQuery}-${vNum}-${i}`,
-              reference: `${refQuery.split(':')[0]}:${vNum}`,
-              text: text.trim(),
-              bookHeader: i === 0 ? refQuery : undefined
-            };
-          });
-        }
-      } else if (activeTrans === 'net') {
-        const res = await fetch(`https://labs.bible.org/api/?passage=${encodeURIComponent(refQuery)}&type=json`, { signal: controller.signal });
-        const data = await res.json();
-        fetchedVerses = data.map((v: any, i: number) => ({
-          id: `net-${v.book}-${v.chapter}-${v.verse}`,
-          reference: `${v.book} ${v.chapter}:${v.verse}`,
-          text: v.text.replace(/<[^>]*>/g, '').trim(),
-          bookHeader: i === 0 ? refQuery : undefined
-        }));
-      } else {
-        const res = await fetch(`https://bible-api.com/${encodeURIComponent(refQuery)}?translation=${activeTrans}`, { signal: controller.signal });
-        const data = await res.json();
-        if (!data.verses) throw new Error("Passage not found.");
-        fetchedVerses = data.verses.map((v: any, i: number) => ({
-          id: `${v.book_id}-${v.chapter}-${v.verse}-${Math.random()}`,
-          reference: `${v.book_name} ${v.chapter}:${v.verse}`,
-          text: v.text.replace(/\n/g, ' ').trim(),
-          bookHeader: i === 0 ? refQuery : undefined
-        }));
-      }
-      
-      clearTimeout(id);
-      
-      if (fetchedVerses.length === 0) throw new Error("Could not parse passage.");
+        if (data.passages && data.passages.length > 0) {
+          const cleanText = data.passages[0].replace(/\(ESV\)/g, '').replace(/\n/g, ' ').trim();
+          const verseMatches = Array.from(cleanText.matchAll(/\[(\d+)\]\s*(.*?)(?=\s*\[\d+\]|$)/g));
+          const chapterMatch = data.canonical.match(/(\d+):/);
+          const currentChapter = chapterMatch ? chapterMatch[1] : (data.canonical.match(/(\d+)$/) ? data.canonical.match(/(\d+)$/)[1] : "1");
+          if (verseMatches.length > 0) {
+            fetchedVersesRaw = verseMatches.map((m: any) => ({
+              id: `esv-${m[1]}-${Math.random().toString(36).substr(2, 5)}`, reference: formatReference(`${currentBookName} ${currentChapter}:${m[1]}`), text: m[2].trim()
+            }));
+          } else {
+            fetchedVersesRaw = [{ id: `esv-1-${Math.random().toString(36).substr(2, 5)}`, reference: formatReference(data.canonical), text: cleanText }];
+          }
+        } else throw new Error("Passage not found.");
 
-      const updatedVerses = isAppend ? [...verses, ...fetchedVerses] : fetchedVerses;
-      setVerses(updatedVerses);
+      } else if (activeTrans === 'net') {
+        const targetUrl = `https://labs.bible.org/api/?passage=${encodeURIComponent(refQuery)}&type=json`;
+        let textData = null;
+        try {
+          const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`);
+          if (res.ok) textData = await res.text(); else throw new Error();
+        } catch (err1) {
+          const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
+          if (res.ok) { const proxyData = await res.json(); textData = proxyData.contents; }
+          else throw new Error("Network/Proxy connection failed.");
+        }
+        const jsonData = JSON.parse(textData!);
+        if (Array.isArray(jsonData) && jsonData.length > 0) {
+          fetchedVersesRaw = jsonData.map((v: any) => ({
+            id: `net-${v.bookname}-${v.chapter}-${v.verse}-${Math.random().toString(36).substr(2, 5)}`,
+            reference: formatReference(`${currentBookName} ${v.chapter}:${v.verse}`),
+            text: v.text.replace(/<[^>]+>/g, '').trim()
+          }));
+        } else throw new Error("Passage not found.");
+
+      } else if (['wlc', 'lxx', 'clementine', 'tr'].includes(activeTrans)) {
+        let bookChap: string;
+        let versePart: string | null = null;
+        
+        const colonIdx = refQuery.lastIndexOf(':');
+        if (colonIdx === -1) {
+          // No colon, assume whole chapter. E.g., "Judges 1"
+          bookChap = refQuery.trim();
+          versePart = null;
+        } else {
+          bookChap = refQuery.substring(0, colonIdx).trim();
+          versePart = refQuery.substring(colonIdx + 1).trim();
+        }
+
+        const lastSpaceIdx = bookChap.lastIndexOf(' ');
+        if (lastSpaceIdx === -1) throw new Error("Parse error.");
+        let bookNameRaw = bookChap.substring(0, lastSpaceIdx).trim().toLowerCase().replace(/\./g, '');
+        const chapterNum = parseInt(bookChap.substring(lastSpaceIdx + 1), 10);
+        const bookId = BOOK_IDS[bookNameRaw];
+        if (!bookId) throw new Error(`Book '${bookNameRaw}' not recognized.`);
+
+        let bollsTrans = activeTrans.toUpperCase();
+        if (activeTrans === 'clementine') bollsTrans = 'VULG';
+        const bollsUrl = `https://bolls.life/get-text/${bollsTrans}/${bookId}/${chapterNum}/`;
+        let verseData;
+        try {
+          const res = await fetchWithTimeout(bollsUrl);
+          if (res.ok) verseData = await res.json(); else throw new Error();
+        } catch (e) {
+          const proxyRes = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodeURIComponent(bollsUrl)}`);
+          const proxyData = await proxyRes.json();
+          verseData = JSON.parse(proxyData.contents);
+        }
+        
+        let filtered;
+        if (versePart) {
+          let startV: number, endV: number;
+          if (versePart.includes('-')) {
+            const parts = versePart.split('-');
+            startV = parseInt(parts[0], 10); endV = parseInt(parts[1], 10);
+          } else { startV = parseInt(versePart, 10); endV = startV; }
+          filtered = verseData.filter((v: any) => v.verse >= startV && v.verse <= endV);
+        } else {
+          filtered = verseData;
+        }
+
+        fetchedVersesRaw = filtered.map((v: any) => ({
+          id: `${activeTrans}-${bookId}-${chapterNum}-${v.verse}-${Math.random().toString(36).substr(2, 5)}`,
+          reference: formatReference(`${currentBookName} ${chapterNum}:${v.verse}`),
+          text: v.text.replace(/<[^>]+>/g, '').trim()
+        }));
+
+      } else if (activeTrans === 'sblgnt') {
+        const bookChapPart = refQuery.includes(':') ? refQuery.substring(0, refQuery.lastIndexOf(':')) : refQuery;
+        const lastSpaceIdx = bookChapPart.lastIndexOf(' ');
+        const bookNameRaw = bookChapPart.substring(0, lastSpaceIdx).toLowerCase().replace(/\./g, '').trim();
+        const bookId = BOOK_IDS[bookNameRaw];
+        
+        const bookMap: Record<number, string> = {
+          40: 'MAT', 41: 'MRK', 42: 'LUK', 43: 'JHN', 44: 'ACT', 45: 'ROM', 46: '1CO', 47: '2CO', 48: 'GAL', 49: 'EPH',
+          50: 'PHP', 51: 'COL', 52: '1TH', 53: '2TH', 54: '1TI', 55: '2TI', 56: 'TIT', 57: 'PHM', 58: 'HEB', 59: 'JAS',
+          60: '1PE', 61: '2PE', 62: '1JN', 63: '2JN', 64: '3JN', 65: 'JUD', 66: 'REV'
+        };
+        const absBook = bookMap[bookId || 0];
+        if (!absBook) throw new Error(`SBLGNT only supports New Testament books.`);
+        
+        const chapterNum = bookChapPart.substring(lastSpaceIdx + 1);
+        const helloaoUrl = `https://bible.helloao.org/api/grc_sbl/${absBook}/${chapterNum}.json`;
+        
+        const res = await fetchWithTimeout(helloaoUrl);
+        if (!res.ok) throw new Error(`Fetch failed from helloao.org for SBLGNT.`);
+        const data = await res.json();
+        
+        if (data.chapter && data.chapter.content) {
+          const content = data.chapter.content;
+          const versesArray: {id: string, reference: string, text: string}[] = [];
+
+          content.forEach((item: any) => {
+            if (item.type === 'verse') {
+              const verseText = item.content.map((c: any) => {
+                if (typeof c === 'string') return c;
+                return "";
+              }).join('').trim();
+
+              versesArray.push({
+                id: `helloao-${activeTrans}-${absBook}-${chapterNum}-${item.number}`,
+                reference: formatReference(`${currentBookName} ${chapterNum}:${item.number}`),
+                text: verseText
+              });
+            }
+          });
+
+          const versePart = refQuery.includes(':') ? refQuery.split(':')[1] : null;
+          if (versePart) {
+            let startV: number, endV: number;
+            if (versePart.includes('-')) {
+              const parts = versePart.split('-');
+              startV = parseInt(parts[0], 10); endV = parseInt(parts[1], 10);
+            } else { startV = parseInt(versePart, 10); endV = startV; }
+            fetchedVersesRaw = versesArray.filter(v => {
+              const vNum = parseInt(v.reference.split(':').pop() || "0");
+              return vNum >= startV && vNum <= endV;
+            });
+          } else {
+            fetchedVersesRaw = versesArray;
+          }
+        } else throw new Error(`Could not parse ${activeTrans.toUpperCase()} content from helloao.org.`);
+
+      } else {
+        // Standard translations (WEB, KJV, BBE, etc.) via bible-api.com
+        // Check for chapter range like "Genesis 1-2"
+        const rangeMatch = refQuery.match(/^(.+?)\s+(\d+)-(\d+)$/);
+        if (rangeMatch && !refQuery.includes(':')) {
+          const bookName = rangeMatch[1];
+          const startChap = parseInt(rangeMatch[2], 10);
+          const endChap = parseInt(rangeMatch[3], 10);
+          
+          let allVerses: any[] = [];
+          for (let c = startChap; c <= endChap; c++) {
+            const res = await fetchWithTimeout(`https://bible-api.com/${encodeURIComponent(bookName + ' ' + c)}?translation=${activeTrans}`);
+            const data = await res.json();
+            if (data.verses) {
+              allVerses = [...allVerses, ...data.verses];
+            }
+          }
+          if (allVerses.length > 0) {
+            fetchedVersesRaw = allVerses.map((v: any) => ({
+              id: `${v.book_id}-${v.chapter}-${v.verse}-${Math.random().toString(36).substr(2, 5)}`,
+              reference: formatReference(`${currentBookName} ${v.chapter}:${v.verse}`),
+              text: v.text.replace(/\n/g, ' ').trim()
+            }));
+          } else throw new Error("Passage range not found.");
+        } else {
+          const res = await fetchWithTimeout(`https://bible-api.com/${encodeURIComponent(refQuery)}?translation=${activeTrans}`);
+          const data = await res.json();
+          if (data.verses && data.verses.length > 0) {
+            fetchedVersesRaw = data.verses.map((v: any) => ({
+              id: `${v.book_id}-${v.chapter}-${v.verse}-${Math.random().toString(36).substr(2, 5)}`,
+              reference: formatReference(`${currentBookName} ${v.chapter}:${v.verse}`),
+              text: v.text.replace(/\n/g, ' ').trim()
+            }));
+          } else throw new Error("Passage not found.");
+        }
+      }
+
+      if (fetchedVersesRaw.length === 0) throw new Error("Could not find passage.");
+
+      const lastBookName = verses.length > 0 ? getBookNameFromRef(verses[verses.length - 1].reference) : null;
+      let needsHeader = !isAppend || currentBookName !== lastBookName || isBookStart;
+
+      const fetchedVerses: Verse[] = fetchedVersesRaw.map((v, i) => {
+        const currentRef = v.reference;
+        const prevRef = i > 0 ? fetchedVersesRaw[i-1].reference : (isAppend && verses.length > 0 ? verses[verses.length-1].reference : null);
+        
+        let text = v.text;
+        let html = v.html;
+        let acrostic = undefined;
+        
+        // Robust regex to match markers like (Aleph) א, [Aleph] א, or א (Aleph)
+        const acrosticRegex = /([(\[][A-Za-z\s]+[)\]]\s*[\u0590-\u05FF][\.:]?|[\u0590-\u05FF][\.:]?\s*[(\[][A-Za-z\s]+[)\]])/;
+        const acrosticMatch = text.match(acrosticRegex);
+        
+        if (acrosticMatch) {
+          acrostic = acrosticMatch[0].trim();
+          text = text.replace(acrosticMatch[0], '').replace(/\s+/g, ' ').trim();
+          if (html) {
+            html = html.replace(acrosticMatch[0], '').replace(/\s+/g, ' ').trim();
+          }
+        }
+
+        const getChapter = (ref: string) => {
+          const parts = ref.split(' ');
+          const lastPart = parts[parts.length - 1];
+          return lastPart.split(':')[0];
+        };
+
+        const currentChapter = getChapter(currentRef);
+        const prevChapter = prevRef ? getChapter(prevRef) : null;
+        const isChapterChange = prevChapter && currentChapter !== prevChapter;
+
+        return {
+          ...v,
+          text,
+          html,
+          acrostic,
+          bookHeader: (i === 0 && needsHeader) ? headerName : undefined,
+          isNewPassage: (i === 0 && isAppend) ? true : false,
+          isNewChapter: !!isChapterChange
+        };
+      });
+
+      const finalVerses = isAppend ? [...verses, ...fetchedVerses] : fetchedVerses;
+      const finalTitle = headerName;
+      
+      setVerses(finalVerses);
       
       setSlides(prev => {
         const next = [...prev];
         if (next[currentSlideIndex]) {
           next[currentSlideIndex] = { 
             ...next[currentSlideIndex], 
-            content: updatedVerses, 
-            title: formatReference(refQuery) 
+            content: finalVerses, 
+            title: finalTitle 
           };
         }
         return next;
       });
 
-      if (!isAppend) setActiveVerseIndex(0);
-      syncStateToStorage({ index: isAppend ? activeVerseIndex : 0, verses: updatedVerses });
-      
+      if (!isAppend || verses.length === 0) {
+        setActiveVerseIndex(0);
+      }
     } catch (err: any) {
-      setFetchError(err.name === 'AbortError' ? "Request timed out." : err.message);
+      console.error("Fetch failed:", err);
+      setFetchError(err.message || "An unexpected error occurred.");
     } finally {
       setIsLoading(false);
     }
-  }, [referenceInput, translation, esvApiKey, verses, activeVerseIndex, currentSlideIndex, syncStateToStorage]);
+  }, [activeVerseIndex, esvApiKey, fetchWithTimeout, referenceInput, translation, verses, currentSlideIndex]);
 
   // --- MARKUP TOOLS ---
   const applyFormat = useCallback((command: string, value: string | null = null, skipSync = false) => {
@@ -1212,20 +1462,50 @@ export default function App() {
   const activeFont = useMemo(() => FONT_OPTIONS.find(f => f.id === settings.fontFamily) || FONT_OPTIONS[0], [settings.fontFamily]);
 
   if (appMode === 'present') {
+    const activeVerses = (verses || []).filter((_, i) => i >= activeVerseIndex && i < (activeVerseIndex + (activeSettings.verseCount || 1)));
+    let displayRef = currentSlide.title;
+    
+    if (activeVerses.length > 0) {
+      const firstRef = activeVerses[0].reference;
+      const lastRef = activeVerses[activeVerses.length - 1].reference;
+      
+      const firstParts = firstRef.split(' ');
+      const lastParts = lastRef.split(' ');
+      
+      const book = firstParts.slice(0, -1).join(' ');
+      const firstV = firstParts[firstParts.length - 1];
+      const lastV = lastParts[lastParts.length - 1];
+      
+      if (firstRef === lastRef) {
+        displayRef = firstRef;
+      } else if (book === lastParts.slice(0, -1).join(' ')) {
+        const [fCh, fVs] = firstV.split(':');
+        const [lCh, lVs] = lastV.split(':');
+        if (fCh === lCh) {
+          displayRef = `${book} ${fCh}:${fVs}-${lVs}`;
+        } else {
+          displayRef = `${book} ${firstV}-${lastV}`;
+        }
+      } else {
+        displayRef = `${firstRef} - ${lastRef}`;
+      }
+    }
+
     return (
       <div className="h-screen w-screen overflow-hidden bg-black flex flex-col">
         <SlideRenderer 
           slide={currentSlide} 
-          settings={settings} 
+          settings={activeSettings} 
           activeFont={activeFont} 
           activeVerseIndex={activeVerseIndex} 
           verses={verses}
           readingMode={readingMode}
           translation={translation}
+          containerRef={containerRef}
         />
-        {settings.showReferenceBox && currentSlide.type === 'scripture' && (
-          <div className="fixed bottom-12 right-12 px-8 py-4 rounded-2xl shadow-2xl border border-white/10 backdrop-blur-3xl z-[1000]" style={{ backgroundColor: settings.referenceBoxColor }}>
-            <p className="text-white font-black italic uppercase tracking-tighter text-2xl">{currentSlide.title}</p>
+        {activeSettings.showReferenceBox && currentSlide.type === 'scripture' && (
+          <div className="fixed bottom-12 left-1/2 -translate-x-1/2 px-8 py-4 rounded-2xl shadow-2xl border border-white/10 backdrop-blur-3xl z-[1000]" style={{ backgroundColor: activeSettings.referenceBoxColor }}>
+            <p className="text-white font-black uppercase tracking-tighter text-2xl">{displayRef}</p>
           </div>
         )}
       </div>
@@ -1330,11 +1610,143 @@ export default function App() {
 
         <main className="flex-1 flex flex-col relative bg-black/20">
           {currentSlide.type === 'scripture' && (
-            <div className="p-4 border-b border-white/5 flex items-center gap-4 bg-slate-900/30 z-10">
-              <input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className="flex-1 h-10 bg-slate-800 border border-slate-700 rounded-lg px-4 text-sm outline-none focus:ring-1 focus:ring-amber-500" />
-              <button onClick={() => fetchBiblePassage()} className="h-10 px-6 bg-amber-600 hover:bg-amber-500 rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2"><Search size={16} /> Fetch</button>
-              <div className="w-px h-6 bg-slate-700 mx-2" />
-              <button onClick={() => { const next = !readingMode; setReadingMode(next); syncStateToStorage({ readingMode: next }); }} className={`p-2 rounded-lg transition-all ${readingMode ? 'bg-amber-600 text-white shadow-lg' : 'bg-slate-800 text-slate-400'}`} title="Toggle Reading Mode"><MonitorPlay size={20} /></button>
+            <div className="flex flex-col z-10">
+              <div className="p-4 border-b border-white/5 flex items-center gap-4 bg-slate-900/30">
+                <input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className="flex-1 h-10 bg-slate-800 border border-slate-700 rounded-lg px-4 text-sm outline-none focus:ring-1 focus:ring-amber-500" />
+                <button onClick={() => fetchBiblePassage()} className="h-10 px-6 bg-amber-600 hover:bg-amber-500 rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2"><Search size={16} /> Fetch</button>
+                <div className="w-px h-6 bg-slate-700 mx-2" />
+                <button onClick={() => { const next = !readingMode; setReadingMode(next); syncStateToStorage({ readingMode: next }); }} className={`p-2 rounded-lg transition-all ${readingMode ? 'bg-amber-600 text-white shadow-lg' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`} title="Toggle Reading Mode"><MonitorPlay size={20} /></button>
+                <button onClick={() => setShowSlideSettings(!showSlideSettings)} className={`p-2 rounded-lg transition-all ${showSlideSettings ? 'bg-slate-700 text-white shadow-lg' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`} title="Slide Settings"><SlidersHorizontal size={20} /></button>
+              </div>
+              
+              <AnimatePresence>
+                {showSlideSettings && (
+                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="bg-slate-800/90 border-b border-white/5 overflow-y-auto max-h-[60vh] custom-scrollbar">
+                    <div className="p-6 flex flex-col gap-6">
+                      <div className="flex justify-between items-center">
+                        <h4 className="text-xs font-bold uppercase tracking-widest text-amber-500">Scripture Slide Settings</h4>
+                        <button onClick={() => {
+                          setSlides(prev => {
+                            const next = [...prev];
+                            next[currentSlideIndex].settingsOverride = {};
+                            return next;
+                          });
+                          syncStateToStorage();
+                        }} className="text-[9px] font-bold uppercase tracking-widest text-slate-400 hover:text-white transition-colors">Reset to Defaults</button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* Text Appearance */}
+                        <div className="space-y-4">
+                          <h5 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Text Appearance</h5>
+                          <div>
+                            <div className="flex justify-between text-[10px] font-mono mb-2"><span>Text Size</span><span>{activeSettings.textSize}px</span></div>
+                            <input type="range" min="20" max="100" value={activeSettings.textSize} onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, textSize: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-[10px] font-mono mb-2"><span>Title Size</span><span>{activeSettings.titleSize || 96}px</span></div>
+                            <input type="range" min="20" max="200" value={activeSettings.titleSize || 96} onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, titleSize: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-[10px] font-mono mb-2"><span>Line Spacing</span><span>{activeSettings.textSpacing}</span></div>
+                            <input type="range" min="1" max="3" step="0.1" value={activeSettings.textSpacing} onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, textSpacing: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-[10px] font-mono mb-2"><span>Verse Grouping</span><span>{activeSettings.verseCount} verses</span></div>
+                            <input type="range" min="1" max="10" step="1" value={activeSettings.verseCount} onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, verseCount: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                          </div>
+                          <div>
+                            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mb-2 block">Font Family</label>
+                            <select 
+                              value={activeSettings.fontFamily} 
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, fontFamily: val }; return next; });
+                                syncStateToStorage();
+                              }}
+                              className="w-full bg-slate-700 border border-slate-600 p-2 rounded-lg text-xs outline-none focus:ring-1 focus:ring-amber-500 text-white"
+                            >
+                              {FONT_OPTIONS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Passage Layout */}
+                        <div className="space-y-4">
+                          <h5 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Passage Layout</h5>
+                          
+                          <button onClick={() => {
+                            const val = !activeSettings.showVerseNumbers;
+                            setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, showVerseNumbers: val }; return next; });
+                            syncStateToStorage();
+                          }} className={`flex w-full items-center justify-between p-3 rounded-lg border text-xs transition-all ${activeSettings.showVerseNumbers ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-700 border-slate-600 text-slate-300'}`}>
+                            <span>Show Verse Numbers</span>
+                            <div className={`w-8 h-4 rounded-full relative transition-colors ${activeSettings.showVerseNumbers ? 'bg-amber-500' : 'bg-slate-600'}`}>
+                              <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${activeSettings.showVerseNumbers ? 'right-1' : 'left-1'}`} />
+                            </div>
+                          </button>
+                          
+                          <button onClick={() => {
+                            const val = !activeSettings.oneVersePerLine;
+                            setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, oneVersePerLine: val }; return next; });
+                            syncStateToStorage();
+                          }} className={`flex w-full items-center justify-between p-3 rounded-lg border text-xs transition-all ${activeSettings.oneVersePerLine ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-700 border-slate-600 text-slate-300'}`}>
+                            <span>One Verse Per Line</span>
+                            <div className={`w-8 h-4 rounded-full relative transition-colors ${activeSettings.oneVersePerLine ? 'bg-amber-500' : 'bg-slate-600'}`}>
+                              <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${activeSettings.oneVersePerLine ? 'right-1' : 'left-1'}`} />
+                            </div>
+                          </button>
+                          
+                          <button onClick={() => {
+                            const val = !activeSettings.showReferenceBox;
+                            setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, showReferenceBox: val }; return next; });
+                            syncStateToStorage();
+                          }} className={`flex w-full items-center justify-between p-3 rounded-lg border text-xs transition-all ${activeSettings.showReferenceBox ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-700 border-slate-600 text-slate-300'}`}>
+                            <span>Show Reference Box</span>
+                            <div className={`w-8 h-4 rounded-full relative transition-colors ${activeSettings.showReferenceBox ? 'bg-amber-500' : 'bg-slate-600'}`}>
+                              <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${activeSettings.showReferenceBox ? 'right-1' : 'left-1'}`} />
+                            </div>
+                          </button>
+
+                          <div className="flex flex-col gap-2 mt-2">
+                            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Verse Number Color</label>
+                            <input type="color" value={activeSettings.verseNumberColor} onChange={(e) => {
+                              const val = e.target.value;
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, verseNumberColor: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-8 rounded cursor-pointer border border-slate-600" />
+                          </div>
+                          
+                          <div className="flex flex-col gap-2 mt-2">
+                            <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Ref Box Color</label>
+                            <input type="color" value={activeSettings.referenceBoxColor} onChange={(e) => {
+                              const val = e.target.value;
+                              setSlides(prev => { const next = [...prev]; next[currentSlideIndex].settingsOverride = { ...next[currentSlideIndex].settingsOverride, referenceBoxColor: val }; return next; });
+                              syncStateToStorage();
+                            }} className="w-full h-8 rounded cursor-pointer border border-slate-600" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           )}
           
@@ -1385,6 +1797,45 @@ export default function App() {
 
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-slate-900 border border-slate-700 p-2 rounded-2xl shadow-2xl z-50">
             <div className="flex gap-1 bg-slate-800 p-1 rounded-xl">
+              <button 
+                onClick={() => {
+                  if (currentSlide.type === 'scripture') {
+                    setActiveVerseIndex(prev => {
+                      const next = Math.max(0, prev - activeSettings.verseCount);
+                      syncStateToStorage({ index: next });
+                      return next;
+                    });
+                  } else {
+                    setCurrentSlideIndex(prev => Math.max(0, prev - 1));
+                    setTimeout(() => syncStateToStorage(), 50);
+                  }
+                }} 
+                className="p-3 rounded-lg text-slate-400 hover:bg-slate-700 hover:text-white transition-all" 
+                title="Previous Verse/Slide"
+              >
+                <ChevronUp size={20} />
+              </button>
+              <button 
+                onClick={() => {
+                  if (currentSlide.type === 'scripture') {
+                    setActiveVerseIndex(prev => {
+                      const next = Math.min(prev + activeSettings.verseCount, verses.length - 1);
+                      syncStateToStorage({ index: next });
+                      return next;
+                    });
+                  } else {
+                    setCurrentSlideIndex(prev => Math.min(prev + 1, slides.length - 1));
+                    setTimeout(() => syncStateToStorage(), 50);
+                  }
+                }} 
+                className="p-3 rounded-lg text-slate-400 hover:bg-slate-700 hover:text-white transition-all" 
+                title="Next Verse/Slide"
+              >
+                <ChevronDown size={20} />
+              </button>
+            </div>
+            <div className="w-px h-8 bg-slate-700 mx-1" />
+            <div className="flex gap-1 bg-slate-800 p-1 rounded-xl">
               <button onClick={() => toggleTool('backColor', hexToRgba(activeMarkupColor, 0.4))} className={`p-3 rounded-lg ${activeTool?.type === 'backColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Highlight"><Highlighter size={18} /></button>
               <button onClick={() => toggleTool('underlineColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'underlineColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Underline"><UnderlineIcon size={18} /></button>
               <button onClick={() => toggleTool('circle')} className={`p-3 rounded-lg ${activeTool?.type === 'circle' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Circle"><Circle size={18} /></button>
@@ -1425,36 +1876,7 @@ export default function App() {
                 </div>
 
                 <div className="space-y-3">
-                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Text Appearance</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-[10px] font-mono mb-2"><span>Size</span><span>{settings.textSize}px</span></div>
-                      <input type="range" min="20" max="100" value={settings.textSize} onChange={(e) => setSettings({...settings, textSize: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-[10px] font-mono mb-2"><span>Line Spacing</span><span>{settings.textSpacing}</span></div>
-                      <input type="range" min="1" max="3" step="0.1" value={settings.textSpacing} onChange={(e) => setSettings({...settings, textSpacing: parseFloat(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-[10px] font-mono mb-2"><span>Verse Grouping</span><span>{settings.verseCount} verses</span></div>
-                      <input type="range" min="1" max="10" step="1" value={settings.verseCount} onChange={(e) => setSettings({...settings, verseCount: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Typography</h4>
-                  <select 
-                    value={settings.fontFamily} 
-                    onChange={(e) => setSettings({...settings, fontFamily: e.target.value})}
-                    className="w-full bg-slate-800 border border-slate-700 p-2 rounded-lg text-xs outline-none focus:ring-1 focus:ring-amber-500"
-                  >
-                    {FONT_OPTIONS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                  </select>
-                </div>
-
-                <div className="space-y-3">
-                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Page Settings</h4>
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Global Defaults</h4>
                   <div className="space-y-4">
                     <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-sm">
                       <label className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
@@ -1466,34 +1888,6 @@ export default function App() {
                     <div className="flex flex-col gap-2">
                       <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Background Color</label>
                       <input type="color" value={settings.pageColor} onChange={(e) => setSettings({...settings, pageColor: e.target.value})} className="w-full h-8 rounded cursor-pointer border-none bg-transparent" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-3 border-t border-white/5 pt-4">
-                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Passage Layout</h4>
-                  <div className="flex flex-col gap-3">
-                    <button onClick={() => setSettings({...settings, showVerseNumbers: !settings.showVerseNumbers})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.showVerseNumbers ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
-                      <span>Show Verse Numbers</span>
-                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.showVerseNumbers ? 'bg-amber-500' : 'bg-slate-700'}`}>
-                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.showVerseNumbers ? 'right-1' : 'left-1'}`} />
-                      </div>
-                    </button>
-                    <button onClick={() => setSettings({...settings, oneVersePerLine: !settings.oneVersePerLine})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.oneVersePerLine ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
-                      <span>One Verse Per Line</span>
-                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.oneVersePerLine ? 'bg-amber-500' : 'bg-slate-700'}`}>
-                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.oneVersePerLine ? 'right-1' : 'left-1'}`} />
-                      </div>
-                    </button>
-                    <button onClick={() => setSettings({...settings, showReferenceBox: !settings.showReferenceBox})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.showReferenceBox ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
-                      <span>Show Reference Box</span>
-                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.showReferenceBox ? 'bg-amber-500' : 'bg-slate-700'}`}>
-                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.showReferenceBox ? 'right-1' : 'left-1'}`} />
-                      </div>
-                    </button>
-                    <div className="flex flex-col gap-2 mt-2">
-                      <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Verse Number Color</label>
-                      <input type="color" value={settings.verseNumberColor} onChange={(e) => setSettings({...settings, verseNumberColor: e.target.value})} className="w-full h-8 rounded cursor-pointer border border-slate-700" />
                     </div>
                   </div>
                 </div>

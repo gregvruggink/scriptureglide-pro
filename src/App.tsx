@@ -44,7 +44,7 @@ import {
   PanelLeftOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -138,6 +138,163 @@ const DEFAULT_SETTINGS: AppSettings = {
   referenceBoxColor: '#1e293b'
 };
 
+// --- RENDERER COMPONENT ---
+const SlideRenderer = ({ 
+  slide, 
+  settings, 
+  activeFont, 
+  activeVerseIndex,
+  verses: versesProp,
+  readingMode = false,
+  isControl = false,
+  containerRef,
+  applyActiveTool,
+  translation
+}: { 
+  slide: Slide, 
+  settings: AppSettings, 
+  activeFont: any, 
+  activeVerseIndex: number,
+  verses?: Verse[],
+  readingMode?: boolean,
+  isControl?: boolean,
+  containerRef?: React.RefObject<HTMLDivElement>,
+  applyActiveTool?: () => void,
+  translation?: string
+}) => {
+  if (slide.type === 'scripture') {
+    const verses = versesProp || (slide.content as Verse[]);
+    const isRtl = translation === 'wlc';
+    
+    return (
+      <div 
+        ref={containerRef as any} 
+        className="flex-1 overflow-y-auto no-scrollbar relative flex flex-col transition-colors duration-500"
+        dir={isRtl ? 'rtl' : 'ltr'}
+        style={{ 
+          backgroundColor: settings.pageColor, 
+          fontFamily: activeFont.css, 
+          color: settings.theme === 'dark' ? '#f8fafc' : '#0f172a' 
+        }} 
+        onMouseUp={isControl ? applyActiveTool : undefined}
+      >
+        <div className="h-[20vh] flex-shrink-0" />
+        <div 
+          className={`mx-auto w-full transition-all duration-300 px-6 md:px-12 lg:px-16 ${settings.oneVersePerLine ? 'flex flex-col gap-12' : 'text-start tracking-wide'}`}
+          style={{ 
+            fontSize: `${settings.textSize}px`, 
+            lineHeight: settings.textSpacing, 
+            maxWidth: `${settings.maxWidth}px`,
+            paddingBottom: '40vh'
+          }}
+        >
+          {verses.length > 0 ? verses.map((verse, index) => {
+            const fullRef = verse.reference.split(' ').pop() || '';
+            const verseNumber = (index === 0 || verse.isNewChapter || verse.isNewPassage) ? fullRef : (fullRef.split(':')[1] || fullRef);
+            const isActive = index >= activeVerseIndex && index < activeVerseIndex + settings.verseCount;
+            const isBlurred = readingMode && !isActive;
+
+            return (
+              <React.Fragment key={verse.id}>
+                {verse.bookHeader && (
+                  <div className="w-full text-center py-16 md:py-24 opacity-40 select-none">
+                    <h2 className="text-8xl md:text-9xl font-bold uppercase tracking-widest break-words" style={{ fontFamily: activeFont.css }}>
+                      {verse.bookHeader}
+                    </h2>
+                  </div>
+                )}
+                {(verse.isNewPassage || verse.isNewChapter) && <div className="h-12 w-full" />}
+                <div 
+                  id={`ref-${index}`}
+                  className={`${settings.oneVersePerLine || verse.isNewChapter || verse.acrostic ? 'flex flex-col items-start w-full' : 'inline'}`}
+                  style={{ unicodeBidi: 'plaintext' }}
+                  data-verse-index={index}
+                >
+                  {verse.acrostic && (
+                    <div className="w-full opacity-30 text-[0.45em] tracking-[0.3em] uppercase italic mb-1 flex items-center gap-4" style={{ fontFamily: activeFont.css }}>
+                      {verse.acrostic}
+                      <div className="h-px flex-1 bg-current opacity-20" />
+                    </div>
+                  )}
+                  <div className={`${settings.oneVersePerLine || verse.isNewChapter || verse.acrostic ? 'flex gap-6 items-start w-full' : 'inline'}`}>
+                    {settings.showVerseNumbers && (
+                      <span
+                        className={`text-[0.6em] select-none mr-2 transition-all ${isActive ? 'opacity-40' : 'opacity-10 blur-[2px]'} ${settings.oneVersePerLine || verse.isNewChapter || verse.isNewPassage || verse.acrostic ? 'mt-3 flex-shrink-0' : 'inline-block align-top mt-1'}`}
+                        style={{ color: settings.verseNumberColor, fontFamily: activeFont.css }}
+                      >
+                        {verseNumber}
+                      </span>
+                    )}
+                    <span
+                      id={`verse-${index}`}
+                      contentEditable={isControl && !readingMode} 
+                      suppressContentEditableWarning 
+                      className={`transition-all outline-none leading-relaxed ${isBlurred ? 'opacity-10 blur-[2px] scale-95' : 'opacity-100 scale-100'}`}
+                      style={{ transitionDuration: `${settings.scrollSpeed}ms` }}
+                      dangerouslySetInnerHTML={{ __html: (verse.html || verse.text) + (isRtl ? '' : '\u200E') }}
+                    />
+                  </div>
+                  {!(settings.oneVersePerLine || verse.isNewChapter || verse.acrostic) && <span className="inline"> </span>}
+                </div>
+              </React.Fragment>
+            );
+          }) : (
+            <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-20 pt-24">
+              <Book size={120} strokeWidth={0.5} />
+              <p className="mt-4 font-bold uppercase tracking-[0.3em]">No Scripture Loaded</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (slide.type === 'image') {
+    const src = slide.content.startsWith('http') ? slide.content : convertFileSrc(slide.content);
+    return (
+      <div className="flex-1 flex items-center justify-center bg-black overflow-hidden p-8">
+        <img src={src} alt={slide.title} className="max-w-full max-h-full object-contain shadow-2xl rounded-lg" />
+      </div>
+    );
+  }
+
+  if (slide.type === 'video') {
+    const src = slide.content.startsWith('http') ? slide.content : convertFileSrc(slide.content);
+    return (
+      <div className="flex-1 flex items-center justify-center bg-black overflow-hidden">
+        <video src={src} controls={isControl} autoPlay={!isControl} loop className="max-w-full max-h-full" />
+      </div>
+    );
+  }
+
+  if (slide.type === 'graphic') {
+    return (
+      <div className="flex-1 flex flex-col bg-black overflow-hidden">
+        {slide.content.startsWith('http') ? (
+          <iframe src={slide.content} className="flex-1 border-none w-full h-full" allow="autoplay; fullscreen" />
+        ) : slide.content.trim().startsWith('<') || slide.content.trim().includes('</') ? (
+          <iframe 
+            srcDoc={`<!DOCTYPE html><html><head><style>body { margin: 0; background: black; color: white; overflow: hidden; }</style></head><body>${slide.content}</body></html>`} 
+            className="flex-1 border-none w-full h-full" 
+            allow="autoplay; fullscreen" 
+          />
+        ) : (
+          <div className="flex-1 p-12 text-white font-mono whitespace-pre-wrap overflow-auto">
+            {slide.content}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+       <Layout size={64} className="mb-4 opacity-20" />
+       <p className="uppercase tracking-[0.4em] font-black text-xs opacity-20">{slide.type} module coming soon</p>
+    </div>
+  );
+};
+
 const BOOK_IDS: Record<string, number> = {
   'genesis': 1, 'gen': 1, 'gn': 1, 'exodus': 2, 'ex': 2, 'exod': 2, 'leviticus': 3, 'lev': 3, 'lv': 3, 'numbers': 4, 'num': 4, 'nm': 4, 'deuteronomy': 5, 'deut': 5, 'dt': 5,
   'joshua': 6, 'judges': 7, 'ruth': 8, '1 samuel': 9, '2 samuel': 10,
@@ -184,7 +341,13 @@ const formatReference = (ref: string) => {
 
 export default function App() {
   // --- STATE ---
-  const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>('select');
+  const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('view') === 'presentation') return 'present';
+    }
+    return 'select';
+  });
   const [displayMode, setDisplayMode] = useState<'single' | 'dual'>(() => {
     try { return (localStorage.getItem('osb_pro_display_mode') as 'single' | 'dual') || 'single'; } catch { return 'single'; }
   });
@@ -207,12 +370,13 @@ export default function App() {
 
   const [verses, setVerses] = useState<Verse[]>([]);
   useEffect(() => {
+    if (appMode === 'present') return; // Presentation mode receives verses via sync
     if (currentSlide?.type === 'scripture') {
       setVerses(currentSlide.content);
     } else {
       setVerses([]);
     }
-  }, [currentSlide, currentSlideIndex]);
+  }, [currentSlide, currentSlideIndex, appMode]);
 
   const [readingMode, setReadingMode] = useState(false);
   const [activeVerseIndex, setActiveVerseIndex] = useState(0);
@@ -226,7 +390,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [esvApiKey, setEsvApiKey] = useState(() => {
-    const defaultKey = import.meta.env.VITE_ESV_API_KEY || "";
+    const defaultKey = (import.meta as any).env?.VITE_ESV_API_KEY || "";
     try { return localStorage.getItem('esvApiKey') || defaultKey; } catch { return defaultKey; }
   });
   const [activeTool, setActiveTool] = useState<{ type: string, value: string | null } | null>(null);
@@ -240,6 +404,70 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const presentationWinRef = useRef<Window | null>(null);
 
+  // --- REFS & SYNC ---
+  const stateRef = useRef({ activeVerseIndex, verses, settings, translation, slides, currentSlideIndex });
+  useEffect(() => {
+    stateRef.current = { activeVerseIndex, verses, settings, translation, slides, currentSlideIndex };
+  }, [activeVerseIndex, verses, settings, translation, slides, currentSlideIndex]);
+
+  const [syncChannel] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        return new BroadcastChannel('verse_sync_channel');
+      }
+    } catch (e) {}
+    return { postMessage: () => {}, onmessage: null } as unknown as BroadcastChannel;
+  });
+
+  const syncStateToStorage = useCallback((overrides: { index?: number; verses?: Verse[]; settings?: AppSettings; readingMode?: boolean; forceDomRead?: boolean } = {}) => {
+    if (appMode !== 'control') return;
+    
+    const targetIndex = overrides.index !== undefined ? overrides.index : stateRef.current.activeVerseIndex;
+    const targetReadingMode = overrides.readingMode !== undefined ? overrides.readingMode : readingMode;
+    let currentVerses = overrides.verses !== undefined ? overrides.verses : stateRef.current.verses;
+    let updatedSlides = stateRef.current.slides;
+
+    if (overrides.forceDomRead && overrides.verses === undefined && stateRef.current.verses.length > 0) {
+      currentVerses = stateRef.current.verses.map((v, i) => {
+        const el = document.getElementById(`verse-${i}`);
+        if (!el) return v;
+        const html = el.innerHTML.replace(/\u200E/g, '');
+        if (v.html === html) return v;
+        return { ...v, html };
+      });
+      
+      const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i].html);
+      if (hasChanged) {
+        setVerses(currentVerses);
+        updatedSlides = [...stateRef.current.slides];
+        if (updatedSlides[stateRef.current.currentSlideIndex]) {
+          updatedSlides[stateRef.current.currentSlideIndex] = { 
+            ...updatedSlides[stateRef.current.currentSlideIndex], 
+            content: currentVerses 
+          };
+        }
+        setSlides(updatedSlides);
+      }
+    }
+
+    const stateToSave = { 
+      slides: updatedSlides,
+      currentSlideIndex: stateRef.current.currentSlideIndex,
+      verses: currentVerses, 
+      activeIndex: targetIndex, 
+      readingMode: targetReadingMode,
+      settings: overrides.settings || stateRef.current.settings,
+      translation: stateRef.current.translation
+    };
+
+    try { syncChannel.postMessage(stateToSave); } catch (e) {}
+    if (isTauriApp) { invoke('set_state', { state: stateToSave }).catch(() => {}); }
+    try {
+      localStorage.setItem('osb_pro_state', JSON.stringify(stateToSave));
+      localStorage.setItem('osb_pro_slides', JSON.stringify(updatedSlides));
+    } catch (e) {}
+  }, [appMode, syncChannel, isTauriApp, readingMode, verses, settings, translation, slides, currentSlideIndex]);
+
   useEffect(() => {
     const initTauri = async () => {
       console.log('Starting Tauri Bridge initialization...');
@@ -249,7 +477,6 @@ export default function App() {
           console.log('Bridge found via try-call! Fetching hardware info...');
           setIsTauriApp(true);
           setAvailableMonitors(m as any[]);
-          checkForUpdates(false);
           setBridgeError(null);
           return;
         } catch (e: any) {
@@ -268,6 +495,55 @@ export default function App() {
     };
     initTauri();
   }, []);
+
+  // --- SYNC LISTENER (for Presentation Mode) ---
+  useEffect(() => {
+    if (appMode !== 'present') return;
+
+    let unlisten: UnlistenFn | null = null;
+    
+    const setupListeners = async () => {
+      if (isTauriApp) {
+        unlisten = await listen('state-changed', (event: any) => {
+          const state = event.payload;
+          if (state.slides) setSlides(state.slides);
+          if (state.currentSlideIndex !== undefined) setCurrentSlideIndex(state.currentSlideIndex);
+          if (state.verses) setVerses(state.verses);
+          if (state.settings) setSettings(state.settings);
+          if (state.activeIndex !== undefined) setActiveVerseIndex(state.activeIndex);
+          if (state.readingMode !== undefined) setReadingMode(state.readingMode);
+        });
+
+        // Get initial state
+        try {
+          const initialState = await invoke('get_state');
+          if (initialState && (initialState as any).slides) {
+            const state = initialState as any;
+            setSlides(state.slides);
+            setCurrentSlideIndex(state.currentSlideIndex);
+            setVerses(state.verses);
+            setSettings(state.settings);
+            setActiveVerseIndex(state.activeIndex);
+            if (state.readingMode !== undefined) setReadingMode(state.readingMode);
+          }
+        } catch (e) {}
+      }
+
+      const channel = new BroadcastChannel('verse_sync_channel');
+      channel.onmessage = (event) => {
+        const state = event.data;
+        if (state.slides) setSlides(state.slides);
+        if (state.currentSlideIndex !== undefined) setCurrentSlideIndex(state.currentSlideIndex);
+        if (state.verses) setVerses(state.verses);
+        if (state.settings) setSettings(state.settings);
+        if (state.activeIndex !== undefined) setActiveVerseIndex(state.activeIndex);
+        if (state.readingMode !== undefined) setReadingMode(state.readingMode);
+      };
+    };
+
+    setupListeners();
+    return () => { if (unlisten) unlisten(); };
+  }, [appMode, isTauriApp]);
 
   const checkForUpdates = async (manual: boolean) => {
     try {
@@ -289,74 +565,106 @@ export default function App() {
     }
   };
 
-  // --- REFS & SYNC ---
-  const stateRef = useRef({ activeVerseIndex, verses, settings, translation, slides, currentSlideIndex });
-  useEffect(() => {
-    stateRef.current = { activeVerseIndex, verses, settings, translation, slides, currentSlideIndex };
-  }, [activeVerseIndex, verses, settings, translation, slides, currentSlideIndex]);
-
-  const [syncChannel] = useState(() => {
+  // --- PERSISTENCE ---
+  const saveStudy = useCallback(async () => {
     try {
-      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-        return new BroadcastChannel('verse_sync_channel');
-      }
-    } catch (e) {}
-    return { postMessage: () => {}, onmessage: null } as unknown as BroadcastChannel;
-  });
-
-  const syncStateToStorage = useCallback((overrides: { index?: number; verses?: Verse[]; settings?: AppSettings; forceDomRead?: boolean } = {}) => {
-    if (appMode !== 'control') return;
-    
-    const targetIndex = overrides.index !== undefined ? overrides.index : stateRef.current.activeVerseIndex;
-    let currentVerses = overrides.verses !== undefined ? overrides.verses : stateRef.current.verses;
-
-    if (overrides.forceDomRead && overrides.verses === undefined && stateRef.current.verses.length > 0) {
-      currentVerses = stateRef.current.verses.map((v, i) => {
-        const el = document.getElementById(`verse-${i}`);
-        if (!el) return v;
-        const html = el.innerHTML.replace(/\u200E/g, '');
-        if (v.html === html) return v;
-        return { ...v, html };
-      });
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
       
-      const hasChanged = currentVerses.some((v, i) => v.html !== stateRef.current.verses[i].html);
-      if (hasChanged) {
-        setVerses(currentVerses);
-        setSlides(prev => {
-          const next = [...prev];
-          if (next[stateRef.current.currentSlideIndex]) {
-            next[stateRef.current.currentSlideIndex] = { ...next[stateRef.current.currentSlideIndex], content: currentVerses };
-          }
-          return next;
-        });
+      const filePath = await save({
+        filters: [{ name: 'ScriptureGlide Markup', extensions: ['glide'] }]
+      });
+
+      if (filePath) {
+        const data = {
+          verses,
+          settings,
+          translation,
+          version: '1.0'
+        };
+        await writeTextFile(filePath, JSON.stringify(data, null, 2));
       }
+    } catch (err: any) {
+      console.error('Failed to save markup:', err);
     }
+  }, [verses, settings, translation]);
 
-    const stateToSave = { 
-      slides: stateRef.current.slides,
-      currentSlideIndex: stateRef.current.currentSlideIndex,
-      verses: currentVerses, 
-      activeIndex: targetIndex, 
-      settings: overrides.settings || stateRef.current.settings,
-      translation: stateRef.current.translation
-    };
-
-    try { syncChannel.postMessage(stateToSave); } catch (e) {}
-    if (isTauriApp) { invoke('set_state', { state: stateToSave }).catch(() => {}); }
+  const loadStudy = useCallback(async () => {
     try {
-      localStorage.setItem('osb_pro_state', JSON.stringify(stateToSave));
-      localStorage.setItem('osb_pro_slides', JSON.stringify(stateRef.current.slides));
-    } catch (e) {}
-  }, [appMode, syncChannel, isTauriApp]);
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const { readTextFile } = await import('@tauri-apps/plugin-fs');
+
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'ScriptureGlide Markup', extensions: ['glide'] }]
+      });
+
+      if (selected && typeof selected === 'string') {
+        const content = await readTextFile(selected);
+        const data = JSON.parse(content);
+        
+        if (data.verses) {
+          const newSlide: Slide = {
+            id: `slide-${Date.now()}`,
+            type: 'scripture',
+            title: data.reference || data.title || "Imported Scripture",
+            content: data.verses
+          };
+          setSlides(prev => {
+            const next = [...prev, newSlide];
+            setTimeout(() => {
+              setCurrentSlideIndex(next.length - 1);
+              setVerses(data.verses);
+              if (data.settings) setSettings(prevS => ({ ...prevS, ...data.settings }));
+              if (data.translation) setTranslation(data.translation);
+              syncStateToStorage({ verses: data.verses, settings: data.settings });
+            }, 100);
+            return next;
+          });
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to load markup:', err);
+    }
+  }, [syncStateToStorage]);
 
   // --- SLIDE ACTIONS ---
-  const addSlide = useCallback((type: SlideType = 'scripture') => {
+  const addSlide = useCallback(async (type: SlideType = 'scripture') => {
+    let content: any = [];
+    let title = "New Scripture";
+
+    if (type === 'image' || type === 'video') {
+      try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const selected = await open({
+          multiple: false,
+          filters: type === 'image' 
+            ? [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+            : [{ name: 'Videos', extensions: ['mp4', 'webm', 'mov'] }]
+        });
+        
+        if (selected && typeof selected === 'string') {
+          content = selected;
+          title = selected.split(/[\\/]/).pop() || `${type} Slide`;
+        } else {
+          return; // Cancelled
+        }
+      } catch (e) {
+        console.error("File picker failed", e);
+        return;
+      }
+    } else if (type === 'graphic') {
+      title = "New Graphic";
+      content = "<h1>New Graphic</h1>";
+    }
+
     const newSlide: Slide = {
       id: `slide-${Date.now()}`,
       type,
-      title: type === 'scripture' ? 'New Scripture' : `New ${type.charAt(0).toUpperCase() + type.slice(1)}`,
-      content: type === 'scripture' ? [] : (type === 'image' || type === 'video' ? '' : '<h1>New Graphic</h1>')
+      title,
+      content
     };
+    
     setSlides(prev => {
       const next = [...prev, newSlide];
       setTimeout(() => {
@@ -378,6 +686,148 @@ export default function App() {
     });
     setTimeout(() => syncStateToStorage(), 50);
   }, [currentSlideIndex, slides.length, syncStateToStorage]);
+
+  // --- GLIDE FILE ACTIONS ---
+  const importGlideFile = useCallback(async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const { readTextFile } = await import('@tauri-apps/plugin-fs');
+      
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Glide Files', extensions: ['glide'] }]
+      });
+      
+      if (selected && typeof selected === 'string') {
+        const content = await readTextFile(selected);
+        const data = JSON.parse(content);
+        
+        if (data.verses) {
+          const newSlide: Slide = {
+            id: `slide-${Date.now()}`,
+            type: 'scripture',
+            title: data.reference || data.title || "Imported Scripture",
+            content: data.verses
+          };
+          
+          setSlides(prev => {
+            const next = [...prev, newSlide];
+            setTimeout(() => {
+              setCurrentSlideIndex(next.length - 1);
+              syncStateToStorage();
+            }, 50);
+            return next;
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Glide import failed", e);
+    }
+  }, [syncStateToStorage]);
+
+  // --- KEYBOARD NAVIGATION ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (appMode !== 'control') return;
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        if (currentSlide.type === 'scripture') {
+          setActiveVerseIndex(prev => {
+            const next = Math.min(prev + settings.verseCount, verses.length - 1);
+            syncStateToStorage({ index: next });
+            return next;
+          });
+        } else {
+          setCurrentSlideIndex(prev => Math.min(prev + 1, slides.length - 1));
+          setTimeout(() => syncStateToStorage(), 50);
+        }
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        if (currentSlide.type === 'scripture') {
+          setActiveVerseIndex(prev => {
+            const next = Math.max(0, prev - settings.verseCount);
+            syncStateToStorage({ index: next });
+            return next;
+          });
+        } else {
+          setCurrentSlideIndex(prev => Math.max(0, prev - 1));
+          setTimeout(() => syncStateToStorage(), 50);
+        }
+      } else if (e.key === 'PageDown') {
+        setCurrentSlideIndex(prev => Math.min(prev + 1, slides.length - 1));
+        setTimeout(() => syncStateToStorage(), 50);
+      } else if (e.key === 'PageUp') {
+        setCurrentSlideIndex(prev => Math.max(0, prev - 1));
+        setTimeout(() => syncStateToStorage(), 50);
+      } else if (e.key === 'Enter') {
+        setReadingMode(prev => {
+          const next = !prev;
+          syncStateToStorage({ readingMode: next });
+          return next;
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [appMode, currentSlide.type, verses.length, slides.length, syncStateToStorage]);
+
+  // --- AUTO SCROLL ---
+  useEffect(() => {
+    if (appMode === 'select' || verses.length === 0) return;
+    
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Use data-verse-index for reliable selection across both modes
+    const targetSelector = `[data-verse-index="${activeVerseIndex}"]`;
+    let firstEl = container.querySelector(targetSelector) as HTMLElement;
+    
+    if (!firstEl) {
+      firstEl = document.getElementById(`verse-${activeVerseIndex}`) as HTMLElement;
+    }
+
+    if (!firstEl) return;
+
+    // Calculate center of entire active group
+    const lastIdx = Math.min(activeVerseIndex + settings.verseCount - 1, verses.length - 1);
+    const lastEl = container.querySelector(`[data-verse-index="${lastIdx}"]`) as HTMLElement || firstEl;
+
+    const groupTop = firstEl.offsetTop;
+    const groupBottom = lastEl.offsetTop + lastEl.clientHeight;
+    const groupHeight = groupBottom - groupTop;
+    const groupCenter = groupTop + (groupHeight / 2);
+    
+    // In control mode, we have a thick bottom toolbar
+    // In present mode, we have a reference box
+    // We want the text centered in the REMAINING visual space to the eye
+    const chromeHeight = appMode === 'control' ? 140 : 80;
+    const visualCenter = (container.clientHeight - chromeHeight) / 2;
+    
+    // Fine-tune target: slight offset upward for better visual balance
+    const targetScroll = Math.max(0, groupCenter - visualCenter - 15);
+    
+    const startScroll = container.scrollTop;
+    const distance = targetScroll - startScroll;
+    const duration = settings.scrollSpeed || 400; // ms
+    const startTime = performance.now();
+
+    const animateScroll = (currentTime: number) => {
+      const elapsed = currentTime - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      
+      // easeOutCubic
+      const easedProgress = 1 - Math.pow(1 - progress, 3);
+
+      container.scrollTop = startScroll + distance * easedProgress;
+
+      if (progress < 1) {
+        requestAnimationFrame(animateScroll);
+      }
+    };
+
+    requestAnimationFrame(animateScroll);
+  }, [activeVerseIndex, settings.scrollSpeed, settings.textSize, settings.textSpacing, settings.verseCount, settings.maxWidth, settings.oneVersePerLine, settings.showVerseNumbers, verses, appMode]);
 
   // --- THEME ---
   const uiTheme = settings.uiTheme || 'dark';
@@ -423,38 +873,106 @@ export default function App() {
   const fetchBiblePassage = useCallback(async (isAppend = false, overrideRef?: string, overrideTrans?: string) => {
     let refQuery = (overrideRef || referenceInput).trim();
     if (!refQuery) return;
+
+    // Expand book-only queries to Chapter 1 if only book is provided
+    try {
+      const lowerQuery = refQuery.toLowerCase().replace(/\./g, '');
+      if (BOOK_IDS[lowerQuery]) {
+        refQuery = `${CANONICAL_BOOKS[BOOK_IDS[lowerQuery]]} 1`;
+        setReferenceInput(refQuery);
+      }
+    } catch (e) {
+      console.warn("Reference normalization failed", e);
+    }
+    
     setIsLoading(true);
     setFetchError(null);
     const activeTrans = overrideTrans || translation;
-    
-    try {
-      const res = await fetchWithTimeout(`https://bible-api.com/${encodeURIComponent(refQuery)}?translation=${activeTrans}`);
-      const data = await res.json();
-      if (!data.verses) throw new Error("Passage not found.");
-      
-      const fetchedVerses: Verse[] = data.verses.map((v: any, i: number) => ({
-        id: `${v.book_id}-${v.chapter}-${v.verse}-${Math.random()}`,
-        reference: `${v.book_name} ${v.chapter}:${v.verse}`,
-        text: v.text.replace(/\n/g, ' ').trim(),
-        bookHeader: i === 0 ? refQuery : undefined
-      }));
 
+    try {
+      let fetchedVerses: Verse[] = [];
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 8000);
+
+      if (activeTrans === 'esv') {
+        if (!esvApiKey) throw new Error("ESV API key required.");
+        const res = await fetch(`https://api.esv.org/v3/passage/html/?q=${encodeURIComponent(refQuery)}&include-passage-references=false&include-verse-numbers=true&include-first-verse-numbers=true&include-footnotes=false&include-footnote-body=false&include-headings=false&include-short-copyright=false&include-css-link=false&inline-styles=false&include-audio-link=false`, {
+          headers: { 'Authorization': `Token ${esvApiKey}` },
+          signal: controller.signal
+        });
+        const data = await res.json();
+        if (!data.passages || data.passages.length === 0) throw new Error("Passage not found.");
+        
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = data.passages[0];
+        const verseNodes = tempDiv.querySelectorAll('.verse-num');
+        
+        if (verseNodes.length > 0) {
+          fetchedVerses = Array.from(verseNodes).map((node, i) => {
+            const vNum = node.textContent?.trim() || "";
+            let text = "";
+            let sibling = node.nextSibling;
+            while (sibling && !((sibling as HTMLElement).classList?.contains('verse-num'))) {
+              text += sibling.textContent;
+              sibling = sibling.nextSibling;
+            }
+            return {
+              id: `esv-${refQuery}-${vNum}-${i}`,
+              reference: `${refQuery.split(':')[0]}:${vNum}`,
+              text: text.trim(),
+              bookHeader: i === 0 ? refQuery : undefined
+            };
+          });
+        }
+      } else if (activeTrans === 'net') {
+        const res = await fetch(`https://labs.bible.org/api/?passage=${encodeURIComponent(refQuery)}&type=json`, { signal: controller.signal });
+        const data = await res.json();
+        fetchedVerses = data.map((v: any, i: number) => ({
+          id: `net-${v.book}-${v.chapter}-${v.verse}`,
+          reference: `${v.book} ${v.chapter}:${v.verse}`,
+          text: v.text.replace(/<[^>]*>/g, '').trim(),
+          bookHeader: i === 0 ? refQuery : undefined
+        }));
+      } else {
+        const res = await fetch(`https://bible-api.com/${encodeURIComponent(refQuery)}?translation=${activeTrans}`, { signal: controller.signal });
+        const data = await res.json();
+        if (!data.verses) throw new Error("Passage not found.");
+        fetchedVerses = data.verses.map((v: any, i: number) => ({
+          id: `${v.book_id}-${v.chapter}-${v.verse}-${Math.random()}`,
+          reference: `${v.book_name} ${v.chapter}:${v.verse}`,
+          text: v.text.replace(/\n/g, ' ').trim(),
+          bookHeader: i === 0 ? refQuery : undefined
+        }));
+      }
+      
+      clearTimeout(id);
+      
+      if (fetchedVerses.length === 0) throw new Error("Could not parse passage.");
+
+      const updatedVerses = isAppend ? [...verses, ...fetchedVerses] : fetchedVerses;
+      setVerses(updatedVerses);
+      
       setSlides(prev => {
         const next = [...prev];
         if (next[currentSlideIndex]) {
-          next[currentSlideIndex] = { ...next[currentSlideIndex], content: fetchedVerses, title: refQuery };
+          next[currentSlideIndex] = { 
+            ...next[currentSlideIndex], 
+            content: updatedVerses, 
+            title: formatReference(refQuery) 
+          };
         }
         return next;
       });
-      setVerses(fetchedVerses);
-      setActiveVerseIndex(0);
-      syncStateToStorage({ index: 0, verses: fetchedVerses });
+
+      if (!isAppend) setActiveVerseIndex(0);
+      syncStateToStorage({ index: isAppend ? activeVerseIndex : 0, verses: updatedVerses });
+      
     } catch (err: any) {
-      setFetchError(err.message);
+      setFetchError(err.name === 'AbortError' ? "Request timed out." : err.message);
     } finally {
       setIsLoading(false);
     }
-  }, [currentSlideIndex, referenceInput, syncStateToStorage, translation, fetchWithTimeout]);
+  }, [referenceInput, translation, esvApiKey, verses, activeVerseIndex, currentSlideIndex, syncStateToStorage]);
 
   // --- MARKUP TOOLS ---
   const applyFormat = useCallback((command: string, value: string | null = null, skipSync = false) => {
@@ -555,17 +1073,114 @@ export default function App() {
     if (!tool) return;
     const selection = window.getSelection();
     if (!selection) return;
-    if (selection.isCollapsed) expandSelectionToWords(selection);
+
+    if (selection.isCollapsed) {
+      expandSelectionToWords(selection);
+    }
+
     const freshSelection = window.getSelection();
     if (!freshSelection || freshSelection.rangeCount === 0) return;
     
-    if (tool.type === 'eraser') applyEraser();
-    else if (tool.type === 'underlineColor') applyUnderline(activeMarkupColor);
-    else if (tool.type === 'circle') applyShape('circle', activeMarkupColor);
-    else if (tool.type === 'box') applyShape('box', activeMarkupColor);
-    else {
-      const finalValue = (tool.type === 'foreColor' || tool.type === 'backColor') ? (tool.value || activeMarkupColor) : tool.value;
-      applyFormat(tool.type, finalValue);
+    const isEraser = tool.type === 'eraser';
+    const hasSelection = freshSelection.toString().length > 0;
+    if (!isEraser && !hasSelection) return;
+
+    const range = freshSelection.getRangeAt(0);
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Collect involved verses and their sub-ranges FIRST
+    const allVerses = Array.from(container.querySelectorAll('[id^="verse-"]'));
+    const verseTasks: { el: HTMLElement, startContainer: Node, startOffset: number, endContainer: Node, endOffset: number }[] = [];
+    
+    const startContainer = range.startContainer;
+    const startOffset = range.startOffset;
+    const endContainer = range.endContainer;
+    const endOffset = range.endOffset;
+
+    allVerses.forEach(v => {
+      const node = v as Node;
+      if (range.intersectsNode(node)) {
+        const el = v as HTMLElement;
+        let vStartNode: Node = el, vStartOff = 0, vEndNode: Node = el, vEndOff = el.childNodes.length;
+
+        if (el.contains(startContainer)) {
+          vStartNode = startContainer;
+          vStartOff = startOffset;
+        } else {
+          vStartNode = el;
+          vStartOff = 0;
+        }
+
+        if (el.contains(endContainer)) {
+          vEndNode = endContainer;
+          vEndOff = endOffset;
+        } else {
+          vEndNode = el;
+          vEndOff = el.childNodes.length;
+        }
+
+        verseTasks.push({ el, startContainer: vStartNode, startOffset: vStartOff, endContainer: vEndNode, endOffset: vEndOff });
+      }
+    });
+
+    if (verseTasks.length > 1) {
+      verseTasks.forEach(task => {
+        try {
+          const vRange = document.createRange();
+          vRange.setStart(task.startContainer, task.startOffset);
+          vRange.setEnd(task.endContainer, task.endOffset);
+
+          if (!vRange.collapsed) {
+            const sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(vRange);
+              
+              if (isEraser) applyEraser(true);
+              else if (tool.type === 'underlineColor') applyUnderline(activeMarkupColor, true);
+              else if (tool.type === 'circle') applyShape('circle', activeMarkupColor, true);
+              else if (tool.type === 'box') applyShape('box', activeMarkupColor, true);
+              else {
+                const { type, value } = tool;
+                const finalValue = (type === 'foreColor' || type === 'backColor') ? (value || activeMarkupColor) : value;
+                applyFormat(type, finalValue, true);
+              }
+            }
+          }
+        } catch (e) { console.warn("Verse task failed", e); }
+      });
+      
+      window.getSelection()?.removeAllRanges();
+      const finalRange = document.createRange();
+      finalRange.setStartBefore(verseTasks[0].el);
+      finalRange.setEndAfter(verseTasks[verseTasks.length - 1].el);
+      window.getSelection()?.addRange(finalRange);
+      
+      setTimeout(() => syncStateToStorage({ forceDomRead: true }), 200);
+      return;
+    }
+
+    const node = freshSelection.anchorNode;
+    if (!node) return;
+    
+    let isInsideEditable = false;
+    let curr: Node | null = node;
+    while (curr && curr !== document.body) {
+      if (curr === containerRef.current) { isInsideEditable = true; break; }
+      curr = curr.parentNode;
+    }
+    
+    if (isInsideEditable) {
+      if (isEraser) applyEraser();
+      else if (tool.type === 'underlineColor') applyUnderline(activeMarkupColor);
+      else if (tool.type === 'circle') applyShape('circle', activeMarkupColor);
+      else if (tool.type === 'box') applyShape('box', activeMarkupColor);
+      else {
+        const { type, value } = tool;
+        const finalValue = (type === 'foreColor' || type === 'backColor') ? (value || activeMarkupColor) : value;
+        applyFormat(type, finalValue);
+      }
     }
   }, [activeMarkupColor, activeTool, applyFormat, applyUnderline, applyEraser, applyShape, expandSelectionToWords, syncStateToStorage]);
 
@@ -595,6 +1210,27 @@ export default function App() {
 
   // --- RENDER HELPERS ---
   const activeFont = useMemo(() => FONT_OPTIONS.find(f => f.id === settings.fontFamily) || FONT_OPTIONS[0], [settings.fontFamily]);
+
+  if (appMode === 'present') {
+    return (
+      <div className="h-screen w-screen overflow-hidden bg-black flex flex-col">
+        <SlideRenderer 
+          slide={currentSlide} 
+          settings={settings} 
+          activeFont={activeFont} 
+          activeVerseIndex={activeVerseIndex} 
+          verses={verses}
+          readingMode={readingMode}
+          translation={translation}
+        />
+        {settings.showReferenceBox && currentSlide.type === 'scripture' && (
+          <div className="fixed bottom-12 right-12 px-8 py-4 rounded-2xl shadow-2xl border border-white/10 backdrop-blur-3xl z-[1000]" style={{ backgroundColor: settings.referenceBoxColor }}>
+            <p className="text-white font-black italic uppercase tracking-tighter text-2xl">{currentSlide.title}</p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (appMode === 'select') {
     return (
@@ -633,7 +1269,24 @@ export default function App() {
             <button onClick={() => addSlide('scripture')} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Add Scripture Slide"><Book size={18} /></button>
             <button onClick={() => addSlide('image')} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Add Image Slide"><ImageIcon size={18} /></button>
             <button onClick={() => addSlide('video')} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Add Video Slide"><Film size={18} /></button>
+            <button onClick={() => addSlide('graphic')} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Add Graphic Slide"><Code size={18} /></button>
+            <div className="w-px h-4 bg-slate-700 mx-1 self-center" />
+            <button onClick={saveStudy} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Save .glide File"><Save size={18} /></button>
+            <button onClick={loadStudy} className="p-2 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white" title="Open .glide File"><FolderOpen size={18} /></button>
           </div>
+
+          <select 
+            value={translation} 
+            onChange={(e) => {
+              const val = e.target.value;
+              setTranslation(val);
+              if (currentSlide.type === 'scripture') fetchBiblePassage(false, currentSlide.title, val);
+            }} 
+            className="h-10 bg-slate-800 border border-slate-700 rounded-lg px-3 text-xs font-bold text-slate-300 outline-none focus:ring-1 focus:ring-amber-500"
+          >
+            {TRANSLATIONS.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+
           <div className="w-px h-6 bg-slate-700 mx-2" />
           <button onClick={togglePresentation} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-widest transition-all ${isPresenting ? 'bg-red-500 text-white' : 'bg-amber-600 text-white'}`}>
             <Tv size={16} /> {isPresenting ? 'Stop' : 'Present'}
@@ -652,11 +1305,12 @@ export default function App() {
               </div>
               <div className="flex-1 overflow-y-auto p-3 space-y-3 no-scrollbar">
                 {slides.map((slide, index) => (
-                  <div key={slide.id} onClick={() => setCurrentSlideIndex(index)} className={`group relative aspect-video rounded-xl border-2 transition-all cursor-pointer overflow-hidden ${currentSlideIndex === index ? 'border-amber-500 ring-4 ring-amber-500/20' : 'border-slate-800 hover:border-slate-600'}`}>
+                  <div key={slide.id} onClick={() => { setCurrentSlideIndex(index); setTimeout(() => syncStateToStorage(), 50); }} className={`group relative aspect-video rounded-xl border-2 transition-all cursor-pointer overflow-hidden ${currentSlideIndex === index ? 'border-amber-500 ring-4 ring-amber-500/20' : 'border-slate-800 hover:border-slate-600'}`}>
                     <div className="absolute inset-0 bg-slate-800 flex items-center justify-center opacity-40">
                       {slide.type === 'scripture' && <Book size={24} />}
                       {slide.type === 'image' && <ImageIcon size={24} />}
                       {slide.type === 'video' && <Film size={24} />}
+                      {slide.type === 'graphic' && <Code size={24} />}
                     </div>
                     <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent">
                       <p className="text-[10px] font-bold truncate text-white">{slide.title}</p>
@@ -675,48 +1329,70 @@ export default function App() {
         </AnimatePresence>
 
         <main className="flex-1 flex flex-col relative bg-black/20">
-          {currentSlide.type === 'scripture' ? (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              <div className="p-4 border-b border-white/5 flex items-center gap-4 bg-slate-900/30">
-                <input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className="flex-1 h-10 bg-slate-800 border border-slate-700 rounded-lg px-4 text-sm outline-none focus:ring-1 focus:ring-amber-500" />
-                <button onClick={() => fetchBiblePassage()} className="h-10 px-6 bg-amber-600 hover:bg-amber-500 rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2"><Search size={16} /> Fetch</button>
-              </div>
-              <div ref={containerRef} className="flex-1 overflow-y-auto p-12 no-scrollbar" style={{ backgroundColor: settings.pageColor, fontFamily: activeFont.css, color: settings.theme === 'dark' ? '#f8fafc' : '#0f172a' }} onMouseUp={applyActiveTool}>
-                <div className="max-w-3xl mx-auto space-y-8" style={{ fontSize: `${settings.textSize}px`, lineHeight: settings.textSpacing }}>
-                  {verses.length > 0 ? verses.map((v, i) => (
-                    <div key={v.id} className="group relative">
-                      <span className="absolute -left-12 top-2 text-xs font-bold opacity-20 group-hover:opacity-100 transition-opacity select-none">{v.reference.split(':').pop()}</span>
-                      <span id={`verse-${i}`} contentEditable suppressContentEditableWarning className="outline-none block" dangerouslySetInnerHTML={{ __html: v.html || v.text }} />
-                    </div>
-                  )) : (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-20 pt-24">
-                      <Book size={120} strokeWidth={0.5} />
-                      <p className="mt-4 font-bold uppercase tracking-[0.3em]">No Scripture Loaded</p>
-                    </div>
-                  )}
-                </div>
-              </div>
+          {currentSlide.type === 'scripture' && (
+            <div className="p-4 border-b border-white/5 flex items-center gap-4 bg-slate-900/30 z-10">
+              <input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className="flex-1 h-10 bg-slate-800 border border-slate-700 rounded-lg px-4 text-sm outline-none focus:ring-1 focus:ring-amber-500" />
+              <button onClick={() => fetchBiblePassage()} className="h-10 px-6 bg-amber-600 hover:bg-amber-500 rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2"><Search size={16} /> Fetch</button>
+              <div className="w-px h-6 bg-slate-700 mx-2" />
+              <button onClick={() => { const next = !readingMode; setReadingMode(next); syncStateToStorage({ readingMode: next }); }} className={`p-2 rounded-lg transition-all ${readingMode ? 'bg-amber-600 text-white shadow-lg' : 'bg-slate-800 text-slate-400'}`} title="Toggle Reading Mode"><MonitorPlay size={20} /></button>
             </div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
-               <Layout size={64} className="mb-4 opacity-20" />
-               <p className="uppercase tracking-[0.4em] font-black text-xs opacity-20">{currentSlide.type} module coming soon</p>
-               <input type="text" value={currentSlide.title} onChange={(e) => {
-                 const val = e.target.value;
-                 setSlides(prev => {
-                   const next = [...prev];
-                   next[currentSlideIndex].title = val;
-                   return next;
-                 });
-               }} className="mt-8 bg-transparent border-b border-slate-800 text-center text-xl font-bold outline-none focus:border-amber-500 px-4 py-2" />
+          )}
+          
+          <SlideRenderer 
+            slide={currentSlide} 
+            settings={settings} 
+            activeFont={activeFont} 
+            activeVerseIndex={activeVerseIndex}
+            verses={verses}
+            readingMode={readingMode}
+            isControl={true}
+            containerRef={containerRef}
+            applyActiveTool={applyActiveTool}
+            translation={translation}
+          />
+
+          {currentSlide.type !== 'scripture' && (
+            <div className="absolute top-4 right-4 z-20">
+              <input type="text" value={currentSlide.title} onChange={(e) => {
+                const val = e.target.value;
+                setSlides(prev => {
+                  const next = [...prev];
+                  next[currentSlideIndex].title = val;
+                  return next;
+                });
+              }} className="bg-slate-900/80 border border-slate-700 text-white text-xs font-bold outline-none focus:border-amber-500 px-4 py-2 rounded-lg" placeholder="Slide Title" />
+            </div>
+          )}
+
+          {currentSlide.type === 'graphic' && (
+            <div className="absolute top-16 right-4 z-20 w-80">
+              <textarea 
+                value={currentSlide.content} 
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSlides(prev => {
+                    const next = [...prev];
+                    next[currentSlideIndex].content = val;
+                    return next;
+                  });
+                  syncStateToStorage();
+                }} 
+                className="w-full h-40 bg-slate-900/80 border border-slate-700 text-white text-[10px] font-mono outline-none focus:border-amber-500 p-2 rounded-lg" 
+                placeholder="Paste HTML/URL here..." 
+              />
             </div>
           )}
 
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-slate-900 border border-slate-700 p-2 rounded-2xl shadow-2xl z-50">
             <div className="flex gap-1 bg-slate-800 p-1 rounded-xl">
-              <button onClick={() => toggleTool('backColor', hexToRgba(activeMarkupColor, 0.4))} className={`p-3 rounded-lg ${activeTool?.type === 'backColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`}><Highlighter size={18} /></button>
-              <button onClick={() => toggleTool('foreColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'foreColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`}><Type size={18} /></button>
-              <button onClick={() => toggleTool('bold')} className={`p-3 rounded-lg ${activeTool?.type === 'bold' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`}><BoldIcon size={18} /></button>
+              <button onClick={() => toggleTool('backColor', hexToRgba(activeMarkupColor, 0.4))} className={`p-3 rounded-lg ${activeTool?.type === 'backColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Highlight"><Highlighter size={18} /></button>
+              <button onClick={() => toggleTool('underlineColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'underlineColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Underline"><UnderlineIcon size={18} /></button>
+              <button onClick={() => toggleTool('circle')} className={`p-3 rounded-lg ${activeTool?.type === 'circle' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Circle"><Circle size={18} /></button>
+              <button onClick={() => toggleTool('box')} className={`p-3 rounded-lg ${activeTool?.type === 'box' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Box"><Square size={18} /></button>
+              <button onClick={() => toggleTool('foreColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'foreColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Text Color"><Type size={18} /></button>
+              <button onClick={() => toggleTool('bold')} className={`p-3 rounded-lg ${activeTool?.type === 'bold' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Bold"><BoldIcon size={18} /></button>
+              <button onClick={() => toggleTool('italic')} className={`p-3 rounded-lg ${activeTool?.type === 'italic' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Italic"><Italic size={18} /></button>
+              <button onClick={() => toggleTool('eraser')} className={`p-3 rounded-lg ${activeTool?.type === 'eraser' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="Eraser"><Eraser size={18} /></button>
             </div>
             <div className="w-px h-8 bg-slate-700" />
             <div className="flex gap-2 px-2">
@@ -725,7 +1401,7 @@ export default function App() {
               ))}
             </div>
             <div className="w-px h-8 bg-slate-700" />
-            <button onClick={clearAllFormatting} className="p-3 text-slate-400 hover:text-red-500 transition-colors"><RotateCcw size={18} /></button>
+            <button onClick={clearAllFormatting} className="p-3 text-slate-400 hover:text-red-500 transition-colors" title="Reset All Markup"><RotateCcw size={18} /></button>
           </div>
         </main>
       </div>
@@ -747,14 +1423,102 @@ export default function App() {
                     <button onClick={() => setSettings({...settings, theme: 'dark', pageColor: '#0f172a'})} className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${settings.theme === 'dark' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}>Dark</button>
                   </div>
                 </div>
+
                 <div className="space-y-3">
                   <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Text Appearance</h4>
                   <div className="space-y-4">
                     <div>
                       <div className="flex justify-between text-[10px] font-mono mb-2"><span>Size</span><span>{settings.textSize}px</span></div>
-                      <input type="range" min="20" max="100" value={settings.textSize} onChange={(e) => setSettings({...settings, textSize: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                      <input type="range" min="20" max="100" value={settings.textSize} onChange={(e) => setSettings({...settings, textSize: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] font-mono mb-2"><span>Line Spacing</span><span>{settings.textSpacing}</span></div>
+                      <input type="range" min="1" max="3" step="0.1" value={settings.textSpacing} onChange={(e) => setSettings({...settings, textSpacing: parseFloat(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] font-mono mb-2"><span>Verse Grouping</span><span>{settings.verseCount} verses</span></div>
+                      <input type="range" min="1" max="10" step="1" value={settings.verseCount} onChange={(e) => setSettings({...settings, verseCount: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
                     </div>
                   </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Typography</h4>
+                  <select 
+                    value={settings.fontFamily} 
+                    onChange={(e) => setSettings({...settings, fontFamily: e.target.value})}
+                    className="w-full bg-slate-800 border border-slate-700 p-2 rounded-lg text-xs outline-none focus:ring-1 focus:ring-amber-500"
+                  >
+                    {FONT_OPTIONS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                  </select>
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Page Settings</h4>
+                  <div className="space-y-4">
+                    <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-sm">
+                      <label className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                        <span>Max Page Width</span>
+                        <span className="text-white font-mono">{settings.maxWidth}px</span>
+                      </label>
+                      <input type="range" min="600" max="2400" step="40" value={settings.maxWidth || 1024} onChange={(e) => setSettings({...settings, maxWidth: parseInt(e.target.value)})} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Background Color</label>
+                      <input type="color" value={settings.pageColor} onChange={(e) => setSettings({...settings, pageColor: e.target.value})} className="w-full h-8 rounded cursor-pointer border-none bg-transparent" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 border-t border-white/5 pt-4">
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Passage Layout</h4>
+                  <div className="flex flex-col gap-3">
+                    <button onClick={() => setSettings({...settings, showVerseNumbers: !settings.showVerseNumbers})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.showVerseNumbers ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                      <span>Show Verse Numbers</span>
+                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.showVerseNumbers ? 'bg-amber-500' : 'bg-slate-700'}`}>
+                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.showVerseNumbers ? 'right-1' : 'left-1'}`} />
+                      </div>
+                    </button>
+                    <button onClick={() => setSettings({...settings, oneVersePerLine: !settings.oneVersePerLine})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.oneVersePerLine ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                      <span>One Verse Per Line</span>
+                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.oneVersePerLine ? 'bg-amber-500' : 'bg-slate-700'}`}>
+                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.oneVersePerLine ? 'right-1' : 'left-1'}`} />
+                      </div>
+                    </button>
+                    <button onClick={() => setSettings({...settings, showReferenceBox: !settings.showReferenceBox})} className={`flex items-center justify-between p-3 rounded-lg border text-xs transition-all ${settings.showReferenceBox ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                      <span>Show Reference Box</span>
+                      <div className={`w-8 h-4 rounded-full relative transition-colors ${settings.showReferenceBox ? 'bg-amber-500' : 'bg-slate-700'}`}>
+                        <div className={`absolute top-1 w-2 h-2 rounded-full bg-white transition-all ${settings.showReferenceBox ? 'right-1' : 'left-1'}`} />
+                      </div>
+                    </button>
+                    <div className="flex flex-col gap-2 mt-2">
+                      <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Verse Number Color</label>
+                      <input type="color" value={settings.verseNumberColor} onChange={(e) => setSettings({...settings, verseNumberColor: e.target.value})} className="w-full h-8 rounded cursor-pointer border border-slate-700" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Markup Intensity</h4>
+                  <input type="range" min="0.1" max="1" step="0.1" value={settings.highlightIntensity} onChange={(e) => setSettings({...settings, highlightIntensity: parseFloat(e.target.value)})} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-600" />
+                </div>
+
+                {isTauriApp && availableMonitors.length > 1 && (
+                  <div className="space-y-3 pt-4 border-t border-white/5">
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Target Display</h4>
+                    <select 
+                      value={settings.targetMonitor} 
+                      onChange={(e) => setSettings({...settings, targetMonitor: parseInt(e.target.value)})}
+                      className="w-full bg-slate-800 border border-slate-700 p-2 rounded-lg text-xs outline-none"
+                    >
+                      {availableMonitors.map((m, i) => <option key={i} value={i}>{m.name || `Display ${i + 1}`}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                <div className="space-y-3 pt-6 border-t border-white/5">
+                  <button onClick={() => checkForUpdates(true)} className={`w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all bg-slate-800 text-slate-400 hover:bg-slate-700`}>Check for Updates</button>
+                  <button onClick={() => { setResetKey(k => k + 1); syncStateToStorage(); }} className={`w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all bg-slate-800 text-slate-400 hover:bg-slate-700`}>Hard Reset Sync</button>
                 </div>
               </div>
             </motion.div>

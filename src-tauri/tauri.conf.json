@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: https: http: data: localhost:3000 http://localhost:3000 https://asset.localhost; video-src 'self' asset: https: http: data: https://asset.localhost; connect-src 'self' http://localhost:3000 localhost:3000 https://bible-api.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     },
     "withGlobalTauri": true
   },

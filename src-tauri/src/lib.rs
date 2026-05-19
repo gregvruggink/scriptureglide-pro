@@ -13,13 +13,13 @@ fn get_state(state: State<AppState>) -> serde_json::Value {
 #[tauri::command]
 fn set_state(state: serde_json::Value, app_state: State<AppState>, app: AppHandle) {
     *app_state.current_state.lock().unwrap() = state.clone();
-    app.emit("state-changed", state).unwrap();
+    let _ = app.emit("state-changed", state);
 }
 
 #[tauri::command]
 async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) {
     if let Some(window) = app.get_webview_window("presentation") {
-        window.set_focus().unwrap();
+        let _ = window.set_focus();
     } else {
         // Detect monitors
         let monitors = app.available_monitors().unwrap_or_default();
@@ -35,7 +35,7 @@ async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) 
         
         let pos = target_monitor.position();
 
-        let window = WebviewWindowBuilder::new(
+        match WebviewWindowBuilder::new(
             &app,
             "presentation",
             WebviewUrl::App("?view=presentation".into())
@@ -44,22 +44,26 @@ async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) 
         .position(pos.x as f64, pos.y as f64)
         .fullscreen(true)
         .decorations(false)
-        .build()
-        .unwrap();
-
-        let app_handle = app.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                app_handle.emit("presentation-closed", ()).unwrap();
+        .build() {
+            Ok(window) => {
+                let app_handle = app.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                        let _ = app_handle.emit("presentation-closed", ());
+                    }
+                });
             }
-        });
+            Err(e) => {
+                log::error!("Failed to create presentation window: {}", e);
+            }
+        }
     }
 }
 
 #[tauri::command]
 async fn close_presentation_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("presentation") {
-        window.close().unwrap();
+        let _ = window.close();
     }
 }
 
@@ -74,6 +78,11 @@ async fn list_monitors(app: AppHandle) -> Vec<serde_json::Value> {
             "height": m.size().height
         })
     }).collect()
+}
+
+#[tauri::command]
+fn emit_event(app: AppHandle, event: String, payload: serde_json::Value) {
+    let _ = app.emit(&event, payload);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,7 +101,8 @@ pub fn run() {
             set_state,
             open_presentation_window,
             close_presentation_window,
-            list_monitors
+            list_monitors,
+            emit_event
         ])
         .setup(|app| {
             let handle = app.handle().clone();

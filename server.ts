@@ -5,7 +5,7 @@ import path from 'path';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  let PORT = 3000;
 
   app.use(cors());
   app.use(express.json({ limit: '10mb' }));
@@ -22,11 +22,15 @@ async function startServer() {
   app.post('/api/state', (req, res) => {
     currentState = req.body;
     // Notify all SSE clients
+    let deadClients: express.Response[] = [];
     clients.forEach(client => {
       try {
         client.write(`data: ${JSON.stringify(currentState)}\n\n`);
-      } catch (e) {}
+      } catch (e) {
+        deadClients.push(client);
+      }
     });
+    clients = clients.filter(c => !deadClients.includes(c));
     res.json({ success: true });
   });
 
@@ -64,9 +68,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  const startListening = () => {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+    server.on('error', (e: any) => {
+      if (e.code === 'EADDRINUSE') {
+        console.log(`Port ${PORT} is in use, trying ${PORT + 1}...`);
+        PORT++;
+        startListening();
+      } else {
+        console.error('Server error:', e);
+      }
+    });
+  };
+  startListening();
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("Failed to start server:", err);
+});

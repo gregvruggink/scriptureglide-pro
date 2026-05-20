@@ -152,10 +152,17 @@ const GraphicSlideRenderer = ({ slide, isControl, isThumbnail = false }: { slide
     if (isThumbnail) return "";
     return `<script>(function(){const isControl=${isControl};if(isControl){const relay=(action,e)=>{window.parent.postMessage({type:'graphic_interaction_event',action,data:{x:e.clientX,y:e.clientY,button:e.button,buttons:e.buttons,pointerId:e.pointerId,pointerType:e.pointerType}},'*');};window.addEventListener('scroll',()=>{window.parent.postMessage({type:'graphic_interaction_event',action:'scroll',data:{x:window.scrollX,y:window.scrollY}},'*');},{passive:true});window.addEventListener('pointerdown',e=>relay('pointerdown',e),true);window.addEventListener('pointerup',e=>relay('pointerup',e),true);window.addEventListener('pointermove',e=>{if(e.buttons>0)relay('pointermove',e);},{passive:true,capture:true});window.addEventListener('click',e=>relay('click',e),true);window.addEventListener('input',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'){window.parent.postMessage({type:'graphic_interaction_event',action:'input',data:{value:e.target.value,selector:getSelector(e.target)}},'*');}},true);}function getSelector(el){if(el.id)return '#'+el.id;if(el.name)return '[name=\"'+el.name+'\"]';return el.tagName;}})();</script>`;
   }, [isControl, isThumbnail]);
-  const rawContent = localContent || (typeof slide.content === 'string' ? slide.content : "");
+  const rawContent = localContent || (typeof slide.content === 'string' && !slide.content.endsWith('.html') ? slide.content : "");
+  let injectedBase = "";
+  if (typeof slide.content === 'string' && (slide.content.includes('/') || slide.content.includes('\\'))) {
+    const dir = slide.content.replace(/[\\\/][^\\\/]+$/, '');
+    injectedBase = `<base href="${convertFileSrc(dir)}/">`;
+  }
   const hasBody = /<\/body>/i.test(rawContent);
-  const injectedContent = hasBody ? rawContent.replace(/<\/body>/i, `${syncScript}</body>`) : `${rawContent}${syncScript}`;
-  const srcDoc = `<!DOCTYPE html><html><head><style>body { margin: 0; background: black; color: white; overflow: ${isThumbnail ? 'hidden' : 'auto'}; min-height: 100vh; font-family: sans-serif; }</style></head><body>${injectedContent}</body></html>`;
+  const contentWithSync = hasBody ? rawContent.replace(/<\/body>/i, `${syncScript}</body>`) : `${rawContent}${syncScript}`;
+  const hasHead = /<head>/i.test(contentWithSync);
+  const finalContent = hasHead ? contentWithSync.replace(/<head>/i, `<head>${injectedBase}`) : `<head>${injectedBase}</head>${contentWithSync}`;
+  const srcDoc = `<!DOCTYPE html><html><head>${!hasHead ? injectedBase : ''}<style>body { margin: 0; background: black; color: white; overflow: ${isThumbnail ? 'hidden' : 'auto'}; min-height: 100vh; font-family: sans-serif; }</style></head><body>${finalContent}</body></html>`;
   return (
     <div className={`flex-1 flex flex-col bg-black overflow-hidden ${isThumbnail ? 'pointer-events-none' : ''}`}>
       <iframe ref={iframeRef} srcDoc={srcDoc} className="flex-1 border-none w-full h-full" allow="autoplay; fullscreen" />

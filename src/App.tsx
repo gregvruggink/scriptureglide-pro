@@ -119,7 +119,32 @@ const VideoSlideRenderer = ({ src, isControl }: { src: string, isControl: boolea
 
 const GraphicSlideRenderer = ({ slide, isControl, isThumbnail = false }: { slide: Slide, isControl: boolean, isThumbnail?: boolean }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [localContent, setLocalContent] = useState<string | null>(null);
+  const [scale, setScale] = useState(1);
+
+  // Virtual Stage Dimensions
+  const STAGE_WIDTH = 1920;
+  const STAGE_HEIGHT = 1080;
+
+  useEffect(() => {
+    const updateScale = () => {
+      if (!containerRef.current) return;
+      const { width, height } = containerRef.current.getBoundingClientRect();
+      const scaleX = width / STAGE_WIDTH;
+      const scaleY = height / STAGE_HEIGHT;
+      setScale(Math.min(scaleX, scaleY));
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    const observer = new ResizeObserver(updateScale);
+    if (containerRef.current) observer.observe(containerRef.current);
+    return () => {
+      window.removeEventListener('resize', updateScale);
+      observer.disconnect();
+    };
+  }, []);
+
   useEffect(() => {
     const loadFile = async () => {
       if (slide.type === 'graphic' && typeof slide.content === 'string' && slide.content.endsWith('.html')) {
@@ -128,6 +153,7 @@ const GraphicSlideRenderer = ({ slide, isControl, isThumbnail = false }: { slide
     };
     loadFile();
   }, [slide.content, slide.type]);
+
   useEffect(() => {
     if (isThumbnail || typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
     const channel = new BroadcastChannel('graphic_sync_channel');
@@ -148,10 +174,12 @@ const GraphicSlideRenderer = ({ slide, isControl, isThumbnail = false }: { slide
     window.addEventListener('message', handleIframeMessage);
     return () => { channel.close(); window.removeEventListener('message', handleIframeMessage); };
   }, [isControl, isThumbnail]);
+
   const syncScript = useMemo(() => {
     if (isThumbnail) return "";
     return `<script>(function(){const isControl=${isControl};if(isControl){const relay=(action,e)=>{window.parent.postMessage({type:'graphic_interaction_event',action,data:{x:e.clientX,y:e.clientY,button:e.button,buttons:e.buttons,pointerId:e.pointerId,pointerType:e.pointerType}},'*');};window.addEventListener('scroll',()=>{window.parent.postMessage({type:'graphic_interaction_event',action:'scroll',data:{x:window.scrollX,y:window.scrollY}},'*');},{passive:true});window.addEventListener('pointerdown',e=>relay('pointerdown',e),true);window.addEventListener('pointerup',e=>relay('pointerup',e),true);window.addEventListener('pointermove',e=>{if(e.buttons>0)relay('pointermove',e);},{passive:true,capture:true});window.addEventListener('click',e=>relay('click',e),true);window.addEventListener('input',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'){window.parent.postMessage({type:'graphic_interaction_event',action:'input',data:{value:e.target.value,selector:getSelector(e.target)}},'*');}},true);}function getSelector(el){if(el.id)return '#'+el.id;if(el.name)return '[name=\"'+el.name+'\"]';return el.tagName;}})();</script>`;
   }, [isControl, isThumbnail]);
+
   const rawContent = localContent || (typeof slide.content === 'string' && !slide.content.endsWith('.html') ? slide.content : "");
   let injectedBase = "";
   if (typeof slide.content === 'string' && (slide.content.includes('/') || slide.content.includes('\\'))) {
@@ -163,9 +191,27 @@ const GraphicSlideRenderer = ({ slide, isControl, isThumbnail = false }: { slide
   const hasHead = /<head>/i.test(contentWithSync);
   const finalContent = hasHead ? contentWithSync.replace(/<head>/i, `<head>${injectedBase}`) : `<head>${injectedBase}</head>${contentWithSync}`;
   const srcDoc = `<!DOCTYPE html><html><head>${!hasHead ? injectedBase : ''}<style>body { margin: 0; background: black; color: white; overflow: ${isThumbnail ? 'hidden' : 'auto'}; min-height: 100vh; font-family: sans-serif; }</style></head><body>${finalContent}</body></html>`;
+
   return (
-    <div className={`flex-1 flex flex-col bg-black overflow-hidden ${isThumbnail ? 'pointer-events-none' : ''}`}>
-      <iframe ref={iframeRef} srcDoc={srcDoc} className="flex-1 border-none w-full h-full" allow="autoplay; fullscreen" />
+    <div ref={containerRef} className={`flex-1 flex items-center justify-center bg-black overflow-hidden relative ${isThumbnail ? 'pointer-events-none' : ''}`}>
+      <div 
+        style={{ 
+          width: STAGE_WIDTH, 
+          height: STAGE_HEIGHT, 
+          transform: `scale(${scale})`,
+          transformOrigin: 'center center',
+          flexShrink: 0
+        }}
+        className="relative bg-black shadow-2xl"
+      >
+        <iframe 
+          ref={iframeRef} 
+          srcDoc={srcDoc} 
+          style={{ width: '100%', height: '100%' }}
+          className="border-none" 
+          allow="autoplay; fullscreen" 
+        />
+      </div>
     </div>
   );
 };

@@ -23,6 +23,10 @@ async fn open_presentation_window(app: AppHandle, monitor_index: Option<usize>) 
     } else {
         // Detect monitors
         let monitors = app.available_monitors().unwrap_or_default();
+        if monitors.is_empty() {
+            log::error!("No monitors detected");
+            return;
+        }
         
         // Use requested monitor, or second monitor if available, otherwise primary
         let target_monitor = if let Some(idx) = monitor_index {

@@ -14,20 +14,40 @@ export const fetchPassageData = async (
   let fetchedVersesRaw: any[] = [];
   
   const parseRef = (query: string) => {
+    const q = query.toLowerCase().trim();
+    // Check if it's just a book name
+    const bookIdOnly = BOOK_IDS[q.replace(/\./g, '')];
+    if (bookIdOnly) {
+      return { book: CANONICAL_BOOKS[bookIdOnly], chapter: '1', verse: null, bookId: bookIdOnly };
+    }
+
     // Matches "1 John 2:3", "John 2:3", "Genesis 2", "2:3" (if no book provided)
     const match = query.match(/^((?:\d\s+)?[A-Za-z\s\.]+?)?\s*(\d+)(?::(\d+)(?:-(\d+))?)?$/);
     
     if (!match) {
-      const bookId = BOOK_IDS[query.toLowerCase().replace(/\./g, '').trim()];
+      const bookId = BOOK_IDS[q.replace(/\./g, '')];
       return { book: (bookId && CANONICAL_BOOKS[bookId]) ? CANONICAL_BOOKS[bookId] : query, chapter: '1', verse: null, bookId };
     }
     
     const bookPart = match[1] ? match[1].trim() : "";
     const bookNameRaw = bookPart.toLowerCase().replace(/\./g, '');
     const bookId = BOOK_IDS[bookNameRaw];
-    const book = (bookId && CANONICAL_BOOKS[bookId]) ? CANONICAL_BOOKS[bookId] : (bookPart || "Genesis"); // Fallback to Genesis if no book part found for "2:3"
+    const book = (bookId && CANONICAL_BOOKS[bookId]) ? CANONICAL_BOOKS[bookId] : (bookPart || "Genesis");
     
-    return { book, chapter: match[2], verse: match[3] || null, endVerse: match[4] || null, bookId };
+    let chapter = match[2];
+    let verse = match[3] || null;
+    let endVerse = match[4] || null;
+
+    // Single chapter books logic: if user says "Philemon 5", it likely means Philemon 1:5
+    const singleChapterBooks = [31, 57, 63, 64, 65]; // Obadiah, Philemon, 2 John, 3 John, Jude
+    if (bookId && singleChapterBooks.includes(bookId)) {
+      if (chapter !== '1' && !verse) {
+        verse = chapter;
+        chapter = '1';
+      }
+    }
+    
+    return { book, chapter, verse, endVerse, bookId };
   };
   
   const parsed = parseRef(refQuery);
@@ -83,14 +103,14 @@ export const fetchPassageData = async (
       const cleanText = data.passages[0].replace(/\(ESV\)/g, '').replace(/\n/g, ' ').trim(); 
       // Robust regex for ESV verse markers: [1] or 1:1 or at the very start of string
       const verseRegex = /(?:\[(\d+)\]|(\d+):(\d+))/g;
-      const matches = Array.from(cleanText.matchAll(verseRegex));
+      const matches = Array.from(cleanText.matchAll(verseRegex)) as any[];
       
       if (matches.length === 0) {
         fetchedVersesRaw = [{ id: `esv-${parsed.chapter}-${parsed.verse || '1'}-${Math.random().toString(36).substr(2, 5)}`, reference: formatReference(`${currentBookName} ${parsed.chapter}:${parsed.verse || '1'}`), text: cleanText.trim() }];
       } else {
         for (let i = 0; i < matches.length; i++) {
           const match = matches[i];
-          const nextMatchIndex = matches[i+1] ? matches[i+1].index : cleanText.length;
+          const nextMatchIndex = matches[i+1] ? (matches[i+1] as any).index : cleanText.length;
           const vNum = match[1] || match[3];
           const vCh = match[2] || parsed.chapter;
           const vText = cleanText.substring((match.index || 0) + match[0].length, nextMatchIndex).trim();

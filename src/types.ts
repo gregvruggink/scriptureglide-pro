@@ -18,6 +18,8 @@ export interface Slide {
   content: any; 
   settingsOverride?: Partial<AppSettings>;
   imageMarkups?: ImageMarkup[];
+  translation?: string;
+  fillScreen?: boolean;
 }
 
 export type ImageMarkup = 

@@ -84,32 +84,88 @@ const SlideTransitionWrapper = ({ children, transition, slideId }: { children: R
 
 const VideoSlideRenderer = ({ src, isControl }: { src: string, isControl: boolean }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const syncTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Use useLayoutEffect to ensure mute is applied before audio can start
+  React.useLayoutEffect(() => {
+    const vid = videoRef.current;
+    if (vid && isControl) {
+      vid.muted = true;
+      vid.volume = 0;
+      // Block any attempts to unmute the control screen video
+      const lockSilence = () => {
+        if (!vid.muted || vid.volume !== 0) {
+          vid.muted = true;
+          vid.volume = 0;
+        }
+      };
+      vid.addEventListener('volumechange', lockSilence);
+      return () => vid.removeEventListener('volumechange', lockSilence);
+    }
+  }, [isControl, src]);
+
   useEffect(() => {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       const channel = new BroadcastChannel('video_sync_channel');
       const vid = videoRef.current;
       if (!vid) return;
+
       if (isControl) {
-        const onPlay = () => channel.postMessage({ type: 'video_play', time: vid.currentTime });
+        const onPlay = () => {
+          // Re-enforce silence on play just in case
+          vid.muted = true;
+          vid.volume = 0;
+          channel.postMessage({ type: 'video_play', time: vid.currentTime });
+        };
         const onPause = () => channel.postMessage({ type: 'video_pause', time: vid.currentTime });
         const onSeek = () => channel.postMessage({ type: 'video_seek', time: vid.currentTime });
-        vid.addEventListener('play', onPlay); vid.addEventListener('pause', onPause); vid.addEventListener('seeked', onSeek);
-        return () => { vid.removeEventListener('play', onPlay); vid.removeEventListener('pause', onPause); vid.removeEventListener('seeked', onSeek); channel.close(); };
+        
+        vid.addEventListener('play', onPlay); 
+        vid.addEventListener('pause', onPause); 
+        vid.addEventListener('seeked', onSeek);
+
+        // Periodic sync to prevent drift
+        syncTimerRef.current = setInterval(() => {
+          if (!vid.paused) channel.postMessage({ type: 'video_sync', time: vid.currentTime });
+        }, 1000);
+
+        return () => { 
+          if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+          vid.removeEventListener('play', onPlay); 
+          vid.removeEventListener('pause', onPause); 
+          vid.removeEventListener('seeked', onSeek); 
+          channel.close(); 
+        };
       } else {
         channel.onmessage = (e) => {
           const msg = e.data; if (!vid) return;
           if (msg.type === 'video_play') { vid.currentTime = msg.time; vid.play().catch(console.error); }
           else if (msg.type === 'video_pause') { vid.currentTime = msg.time; vid.pause(); }
           else if (msg.type === 'video_seek') { vid.currentTime = msg.time; }
+          else if (msg.type === 'video_sync') {
+            if (Math.abs(vid.currentTime - msg.time) > 0.5) vid.currentTime = msg.time;
+          }
         };
         return () => channel.close();
       }
     }
   }, [src, isControl]);
+
   return (
     <div className="flex-1 flex items-center justify-center bg-black overflow-hidden">
       {src ? (
-        <video ref={videoRef} key={src} src={src} controls={isControl} autoPlay={false} loop className="max-w-full max-h-full" onError={() => console.error("Video failed to load:", src)} />
+        <video 
+          ref={videoRef} 
+          key={src} 
+          src={src} 
+          controls={isControl} 
+          autoPlay={false} 
+          loop 
+          muted={isControl}
+          playsInline
+          className="max-w-full max-h-full" 
+          onError={() => console.error("Video failed to load:", src)} 
+        />
       ) : (
         <div className="text-slate-500 flex flex-col items-center gap-4"><Film size={48} className="opacity-20" /><p className="text-xs font-bold uppercase tracking-widest opacity-20">No Video Selected</p></div>
       )}
@@ -255,11 +311,12 @@ const ImageSlideRenderer = ({ slide, isControl, activeTool, activeColor, penSize
   const onPointerUp = () => { if (!isControl || !internalMarkup) return; updateSlideMarkups([...(slide.imageMarkups || []), internalMarkup]); setInternalMarkup(null); onMarkupUpdate?.(null); };
   const removeMarkup = (id: string) => { if (isControl && activeTool?.type === 'eraser') updateSlideMarkups((slide.imageMarkups || []).filter(m => m.id !== id)); };
   const imagePath = typeof slide.content === 'string' ? slide.content : ''; const src = imagePath ? (imagePath.startsWith('http') ? imagePath : convertFileSrc(imagePath)) : '';
+  const fillScreen = slide.fillScreen;
   return (
-    <div className="flex-1 flex items-center justify-center bg-black overflow-hidden p-8 relative select-none">
+    <div className={`flex-1 flex items-center justify-center bg-black overflow-hidden relative select-none ${fillScreen ? '' : 'p-8'}`}>
       {src ? (
-        <div className="relative max-w-full max-h-full flex items-center justify-center">
-          <img src={src} alt={slide.title} className="max-w-full max-h-full object-contain shadow-2xl rounded-lg pointer-events-none" />
+        <div className={`relative flex items-center justify-center ${fillScreen ? 'w-full h-full' : 'max-w-full max-h-full'}`}>
+          <img src={src} alt={slide.title} className={`${fillScreen ? 'w-full h-full object-cover' : 'max-w-full max-h-full object-contain shadow-2xl rounded-lg'} pointer-events-none`} />
           <svg ref={svgRef} viewBox="0 0 1000 1000" preserveAspectRatio="none" className={`absolute inset-0 w-full h-full z-10 touch-none ${isControl ? 'cursor-crosshair' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
             {(slide.imageMarkups || []).map(m => (
               <React.Fragment key={m.id}>
@@ -284,9 +341,12 @@ const ImageSlideRenderer = ({ slide, isControl, activeTool, activeColor, penSize
   );
 };
 
-const SlideRenderer = ({ slide, settings, activeFont, activeVerseIndex, verses: versesProp, isControl = false, containerRef, applyActiveTool, translation, activeTool, activeColor, updateSlideMarkups, penSize = 5, onMarkupUpdate, externalMarkup }: { slide: Slide, settings: AppSettings, activeFont: any, activeVerseIndex: number, verses?: Verse[], isControl?: boolean, containerRef?: React.RefObject<HTMLDivElement>, applyActiveTool?: () => void, translation?: string, activeTool?: any, activeColor?: string, updateSlideMarkups?: (markups: ImageMarkup[]) => void, penSize?: number, onMarkupUpdate?: (markup: ImageMarkup | null) => void, externalMarkup?: ImageMarkup | null }) => {
+const SlideRenderer = ({ slide, settings, activeFont, activeVerseIndex, verses: versesProp, isControl = false, containerRef, applyActiveTool, translation: translationProp, activeTool, activeColor, updateSlideMarkups, penSize = 5, onMarkupUpdate, externalMarkup }: { slide: Slide, settings: AppSettings, activeFont: any, activeVerseIndex: number, verses?: Verse[], isControl?: boolean, containerRef?: React.RefObject<HTMLDivElement>, applyActiveTool?: () => void, translation?: string, activeTool?: any, activeColor?: string, updateSlideMarkups?: (markups: ImageMarkup[]) => void, penSize?: number, onMarkupUpdate?: (markup: ImageMarkup | null) => void, externalMarkup?: ImageMarkup | null }) => {
   if (slide.type === 'scripture') {
-    const verses = versesProp || (slide.content as Verse[]); const isRtl = translation === 'wlc'; const isChroma = settings.theme === 'chroma';
+    const verses = versesProp || (slide.content as Verse[]); 
+    const activeTranslation = translationProp || slide.translation || 'esv';
+    const isRtl = activeTranslation === 'wlc'; 
+    const isChroma = settings.theme === 'chroma';
     const textColor = isChroma ? '#ffffff' : (settings.theme === 'dark' ? '#f8fafc' : '#0f172a');
     const textShadow = (!isChroma && settings.textShadow) ? `${settings.shadowOffset}px ${settings.shadowOffset}px ${settings.shadowBlur}px ${settings.shadowColor}` : 'none';
     const WebkitTextStroke = (!isChroma && settings.textOutline) ? `${settings.outlineWidth}px ${settings.outlineColor}` : 'none';
@@ -327,10 +387,36 @@ const SlideRenderer = ({ slide, settings, activeFont, activeVerseIndex, verses: 
 export default function App() {
   const [appMode, setAppMode] = useState<'select' | 'control' | 'present'>(() => { if (typeof window !== 'undefined') { const params = new URLSearchParams(window.location.search); if (params.get('view') === 'presentation') return 'present'; } return 'select'; });
   const [slides, setSlides] = useState<Slide[]>(() => { try { const saved = localStorage.getItem('osb_pro_slides'); if (saved) return JSON.parse(saved); } catch (e) {} return [{ id: 'initial-slide', type: 'scripture', title: 'Genesis 1:1-5', content: DEFAULT_PASSAGE }]; });
-  const [currentSlideIndex, setCurrentSlideIndex] = useState(0); const [verses, setVerses] = useState<Verse[]>([]); const [activeVerseIndex, setActiveVerseIndex] = useState(0); const [showSettings, setShowSettings] = useState(false); const [showSlideSettings, setShowSlideSettings] = useState(false); const [showSidebar, setShowSidebar] = useState(true);
+  const [currentSlideIndex, setCurrentSlideIndex] = useState(0); 
+  const [verses, setVerses] = useState<Verse[]>([]); 
+  const [activeVerseIndex, setActiveVerseIndex] = useState(0); 
+  const [showSettings, setShowSettings] = useState(false); 
+  const [showSlideSettings, setShowSlideSettings] = useState(false); 
+  const [showSidebar, setShowSidebar] = useState(true);
+  
   const [settings, setSettings] = useState<AppSettings>(() => { try { const saved = localStorage.getItem('osb_pro_settings'); return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS; } catch { return DEFAULT_SETTINGS; } });
   useEffect(() => { localStorage.setItem('osb_pro_settings', JSON.stringify(settings)); }, [settings]);
-  const [referenceInput, setReferenceInput] = useState("Genesis 1:1-5"); const [translation, setTranslation] = useState('esv'); const [isLoading, setIsLoading] = useState(false); const [fetchError, setFetchError] = useState<string | null>(null);
+  
+  const [referenceInput, setReferenceInput] = useState("Genesis 1:1-5"); 
+  const [translation, setTranslation] = useState('esv'); 
+  const [isLoading, setIsLoading] = useState(false); 
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const currentSlide = useMemo(() => slides[currentSlideIndex] || slides[0], [slides, currentSlideIndex]);
+
+  // Update local translation and verses when current slide changes
+  useEffect(() => {
+    if (currentSlide.type === 'scripture') {
+      const slideVerses = currentSlide.content as Verse[];
+      const slideTrans = currentSlide.translation || settings.defaultTranslation || 'esv';
+      setVerses(slideVerses);
+      setTranslation(slideTrans);
+      setReferenceInput(currentSlide.title);
+      // Ensure presentation window stays in sync with current slide's unique content
+      setTimeout(() => syncStateToStorage({ verses: slideVerses, translation: slideTrans, index: 0 }), 100);
+    }
+  }, [currentSlideIndex]); // Only trigger on slide navigation
+
   const [esvApiKey, setEsvApiKey] = useState(() => { const defaultKey = (import.meta as any).env?.VITE_ESV_API_KEY || ""; try { return localStorage.getItem('esvApiKey') || defaultKey; } catch { return defaultKey; } });
   const [yvApiKey] = useState("XiJCKjmkQ1e0AlAwkbMKY5nyAIb7T4Y2eAhY8KHiYnuGrqGa");
   const [activeTool, setActiveTool] = useState<{ type: string, value: string | null } | null>(null); const [activeMarkupColor, setActiveMarkupColor] = useState('#fbbf24');
@@ -340,30 +426,39 @@ export default function App() {
   
   useEffect(() => {
     if (isTauriApp) {
-      invoke('list_monitors').then((m: any) => setAvailableMonitors(m as any[])).catch(console.error);
+      const fetchMonitors = () => invoke('list_monitors').then((m: any) => setAvailableMonitors(m as any[])).catch(console.error);
+      fetchMonitors();
+      const interval = setInterval(fetchMonitors, 3000);
+      return () => clearInterval(interval);
     }
   }, [isTauriApp]);
 
   const containerRef = useRef<HTMLDivElement>(null); const scrollAnimationRef = useRef<number | null>(null);
-  const currentSlide = useMemo(() => slides[currentSlideIndex] || slides[0], [slides, currentSlideIndex]);
   const activeSettings = useMemo(() => ({ ...settings, ...(currentSlide.settingsOverride || {}) }), [settings, currentSlide.settingsOverride]);
   const activeFont = useMemo(() => FONT_OPTIONS.find(f => f.id === activeSettings.fontFamily) || FONT_OPTIONS[0], [activeSettings.fontFamily]);
   const syncChannel = useMemo(() => { try { if (typeof window !== 'undefined' && 'BroadcastChannel' in window) return new BroadcastChannel('verse_sync_channel'); } catch (e) {} return { postMessage: () => {}, onmessage: null } as unknown as BroadcastChannel; }, []);
   
   const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const syncStateToStorage = useCallback((overrides: { index?: number; verses?: Verse[]; settings?: AppSettings; slides?: Slide[]; forceDomRead?: boolean } = {}) => {
+  const syncStateToStorage = useCallback((overrides: { index?: number; verses?: Verse[]; settings?: AppSettings; slides?: Slide[]; forceDomRead?: boolean, translation?: string, slideIndex?: number } = {}) => {
     if (appMode !== 'control') return; 
     const targetIndex = overrides.index !== undefined ? overrides.index : activeVerseIndex; 
     const targetSettings = overrides.settings || settings; 
-    const targetTranslation = translation; 
+    const targetTranslation = overrides.translation || translation; 
     const targetSlides = overrides.slides || slides; 
-    const targetSlideIndex = currentSlideIndex;
+    const targetSlideIndex = overrides.slideIndex !== undefined ? overrides.slideIndex : currentSlideIndex;
     
     let currentVerses = overrides.verses !== undefined ? overrides.verses : verses;
-    if (overrides.forceDomRead && overrides.verses === undefined && verses.length > 0) {
+    if (overrides.forceDomRead && currentSlide.type === 'scripture' && verses.length > 0) {
       const updatedVerses = verses.map((v, i) => { const el = document.getElementById(`verse-${i}`); if (!el) return v; const html = el.innerHTML.replace(/\u200E/g, ''); return v.html === html ? v : { ...v, html }; });
-      const hasChanged = updatedVerses.some((v, i) => v.html !== verses[i].html); if (hasChanged) { currentVerses = updatedVerses; setVerses(updatedVerses); }
+      const hasChanged = updatedVerses.some((v, i) => v.html !== verses[i].html); 
+      if (hasChanged) { 
+        currentVerses = updatedVerses; 
+        setVerses(updatedVerses); 
+        if (targetSlides[targetSlideIndex]) {
+          targetSlides[targetSlideIndex] = { ...targetSlides[targetSlideIndex], content: updatedVerses };
+        }
+      }
     }
     const stateToSave = { slides: targetSlides, currentSlideIndex: targetSlideIndex, verses: currentVerses, activeIndex: targetIndex, settings: targetSettings, translation: targetTranslation, activeTool, activeMarkupColor, imageActiveTool, imageActiveColor, imagePenSize };
     try { syncChannel.postMessage(stateToSave); } catch (e) { console.error('Sync channel failed', e); } if (isTauriApp) { invoke('set_state', { state: stateToSave }).catch(e => console.error('Tauri set_state failed', e)); }
@@ -372,7 +467,7 @@ export default function App() {
     syncTimeoutRef.current = setTimeout(() => {
       try { localStorage.setItem('osb_pro_state', JSON.stringify(stateToSave)); localStorage.setItem('osb_pro_slides', JSON.stringify(targetSlides)); localStorage.setItem('osb_pro_settings', JSON.stringify(targetSettings)); } catch (e) { console.error('LocalStorage save failed', e); }
     }, 500);
-  }, [appMode, syncChannel, isTauriApp, verses, settings, translation, slides, currentSlideIndex, activeVerseIndex, activeTool, activeMarkupColor, imageActiveTool, imageActiveColor, imagePenSize]);
+  }, [appMode, syncChannel, isTauriApp, verses, settings, translation, slides, currentSlideIndex, activeVerseIndex, activeTool, activeMarkupColor, imageActiveTool, imageActiveColor, imagePenSize, currentSlide.type]);
   
   const liveMarkupThrottleRef = useRef<boolean>(false);
   const broadcastLiveMarkup = useCallback((markup: ImageMarkup | null) => {
@@ -411,7 +506,19 @@ export default function App() {
 
   const fetchBiblePassage = useCallback(async (isAppend = false, overrideRef?: string, overrideTrans?: string) => {
     let refQuery = (overrideRef || referenceInput).trim(); if (!refQuery) return;
-    try { const lowerQuery = refQuery.toLowerCase().replace(/\./g, ''); if (BOOK_IDS[lowerQuery]) { refQuery = `${CANONICAL_BOOKS[BOOK_IDS[lowerQuery]]} 1`; setReferenceInput(refQuery); } } catch (e) {}
+    try { 
+      const lowerQuery = refQuery.toLowerCase().replace(/\./g, ''); 
+      const bId = BOOK_IDS[lowerQuery];
+      if (bId) { 
+        const singleChapterBooks = [31, 57, 63, 64, 65]; // Obadiah, Philemon, 2 John, 3 John, Jude
+        if (singleChapterBooks.includes(bId)) {
+          refQuery = CANONICAL_BOOKS[bId];
+        } else {
+          refQuery = `${CANONICAL_BOOKS[bId]} 1`; 
+        }
+        setReferenceInput(refQuery); 
+      } 
+    } catch (e) {}
     setIsLoading(true); setFetchError(null); const activeTrans = overrideTrans || translation;
     
     try {
@@ -425,15 +532,21 @@ export default function App() {
       });
       
       const finalVerses = isAppend ? [...verses, ...fetchedVerses] : fetchedVerses; setVerses(finalVerses);
-      setSlides(prev => { const next = [...prev]; if (next[currentSlideIndex]) next[currentSlideIndex] = { ...next[currentSlideIndex], content: finalVerses, title: headerName }; return next; });
+      setSlides(prev => { 
+        const next = [...prev]; 
+        if (next[currentSlideIndex]) {
+          next[currentSlideIndex] = { ...next[currentSlideIndex], content: finalVerses, title: headerName, translation: activeTrans }; 
+        }
+        return next; 
+      });
       
       if (!isAppend) {
         setActiveVerseIndex(0);
       }
       
-      setTimeout(() => syncStateToStorage({ verses: finalVerses, index: isAppend ? activeVerseIndex : 0 }), 100);
+      setTimeout(() => syncStateToStorage({ verses: finalVerses, index: isAppend ? activeVerseIndex : 0, translation: activeTrans }), 100);
     } catch (err: any) { setFetchError(err.message); } finally { setIsLoading(false); }
-  }, [referenceInput, translation, esvApiKey, verses, currentSlideIndex, syncStateToStorage, activeVerseIndex]);
+  }, [referenceInput, translation, esvApiKey, verses, currentSlideIndex, syncStateToStorage, activeVerseIndex, yvApiKey]);
 
 
 
@@ -448,10 +561,10 @@ export default function App() {
       try { const { open } = await import('@tauri-apps/plugin-dialog'); const filters = type === 'image' ? [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] : type === 'video' ? [{ name: 'Videos', extensions: ['mp4', 'webm', 'mov'] }] : [{ name: 'HTML Graphics', extensions: ['html', 'htm'] }]; const selected = await open({ multiple: false, filters }); if (selected && typeof selected === 'string') { content = selected; title = selected.split(/[\\/]/).pop() || `${type} Slide`; } else return; } catch (e) { console.error(e); return; }
     } else if (type === 'scripture') { title = "New Scripture"; content = DEFAULT_PASSAGE; }
     setSlides(prev => { 
-      const next = [...prev, { id: `slide-${Date.now()}`, type, title, content }]; 
+      const next = [...prev, { id: `slide-${Date.now()}`, type, title, content, translation: 'esv' }]; 
       const nextIndex = next.length - 1;
       setCurrentSlideIndex(nextIndex); 
-      setTimeout(() => syncStateToStorage({ slides: next, index: 0 }), 50); 
+      setTimeout(() => syncStateToStorage({ slides: next, index: 0, translation: 'esv' }), 50); 
       return next; 
     }); 
     setShowAddSlideModal(false);
@@ -478,14 +591,33 @@ export default function App() {
       const container = containerRef.current; if (!container) return;
       const firstEl = document.getElementById(`ref-${activeVerseIndex}`) as HTMLElement; if (!firstEl) return;
       const lastIdx = Math.min(activeVerseIndex + activeSettings.verseCount - 1, verses.length - 1); const lastEl = document.getElementById(`ref-${lastIdx}`) as HTMLElement || firstEl;
-      const groupTop = firstEl.offsetTop; const groupBottom = lastEl.offsetTop + lastEl.clientHeight; const groupCenter = groupTop + ((groupBottom - groupTop) / 2);
-      const chromeHeight = appMode === 'control' ? 140 : 80; const visualCenter = (container.clientHeight - chromeHeight) / 2;
-      const targetScroll = Math.max(0, groupCenter - visualCenter - 15);
+      
+      const containerRect = container.getBoundingClientRect();
+      const firstRect = firstEl.getBoundingClientRect();
+      const lastRect = lastEl.getBoundingClientRect();
+      
+      const groupTop = firstRect.top - containerRect.top + container.scrollTop;
+      const groupBottom = lastRect.bottom - containerRect.top + container.scrollTop;
+      const groupHeight = groupBottom - groupTop;
+      
+      const chromeHeight = appMode === 'control' ? 140 : (activeSettings.showReferenceBox ? 120 : 60); 
+      const visualHeight = container.clientHeight - chromeHeight;
+      const visualCenter = visualHeight / 2;
+      
+      let targetScroll = 0;
+      if (groupHeight > visualHeight * 0.8) {
+        // If the group is very tall, align it near the top instead of centering
+        targetScroll = Math.max(0, groupTop - visualHeight * 0.1);
+      } else {
+        const groupCenter = groupTop + groupHeight / 2;
+        targetScroll = Math.max(0, groupCenter - visualCenter);
+      }
+      
       const startScroll = container.scrollTop; const distance = targetScroll - startScroll; if (Math.abs(distance) < 2) { container.scrollTop = targetScroll; return; }
       const duration = activeSettings.scrollSpeed || 400; const startTime = performance.now();
       const animateScroll = (currentTime: number) => { const elapsed = currentTime - startTime; const progress = Math.min(elapsed / duration, 1); const easedProgress = 1 - Math.pow(1 - progress, 3); container.scrollTop = startScroll + distance * easedProgress; if (progress < 1) scrollAnimationRef.current = requestAnimationFrame(animateScroll); else scrollAnimationRef.current = null; };
       scrollAnimationRef.current = requestAnimationFrame(animateScroll);
-    }, 50);
+    }, 100);
     return () => { clearTimeout(timer); if (scrollAnimationRef.current) cancelAnimationFrame(scrollAnimationRef.current); };
   }, [activeVerseIndex, activeSettings.scrollSpeed, activeSettings.verseCount, verses, appMode, activeSettings.maxWidth, activeSettings.oneVersePerLine, activeSettings.showVerseNumbers, activeSettings.textSpacing, activeSettings.textSize]);
   
@@ -502,7 +634,7 @@ export default function App() {
         } else { 
           setCurrentSlideIndex(prev => {
             const next = Math.min(prev + 1, slides.length - 1);
-            setTimeout(() => syncStateToStorage(), 50);
+            syncStateToStorage({ slideIndex: next });
             return next;
           });
         } 
@@ -517,7 +649,7 @@ export default function App() {
         } else { 
           setCurrentSlideIndex(prev => {
             const next = Math.max(0, prev - 1);
-            setTimeout(() => syncStateToStorage(), 50);
+            syncStateToStorage({ slideIndex: next });
             return next;
           });
         } 
@@ -574,7 +706,7 @@ export default function App() {
 
     return ( 
       <div className="h-screen w-screen overflow-hidden bg-black flex flex-col relative" onMouseMove={onMouseMove}>
-        <SlideRenderer slide={currentSlide} settings={activeSettings} activeFont={activeFont} activeVerseIndex={activeVerseIndex} verses={verses} translation={translation} containerRef={containerRef} activeTool={currentSlide.type === 'scripture' ? activeTool : imageActiveTool} activeColor={currentSlide.type === 'scripture' ? activeMarkupColor : imageActiveColor} updateSlideMarkups={updateSlideMarkups} penSize={imagePenSize} externalMarkup={liveMarkup} />
+        <AnimatePresence mode="wait"><SlideTransitionWrapper key={currentSlide.id} transition={activeSettings.slideTransition} slideId={currentSlide.id}><SlideRenderer slide={currentSlide} settings={activeSettings} activeFont={activeFont} activeVerseIndex={activeVerseIndex} verses={verses} translation={translation} containerRef={containerRef} activeTool={currentSlide.type === 'scripture' ? activeTool : imageActiveTool} activeColor={currentSlide.type === 'scripture' ? activeMarkupColor : imageActiveColor} updateSlideMarkups={updateSlideMarkups} penSize={imagePenSize} externalMarkup={liveMarkup} /></SlideTransitionWrapper></AnimatePresence>
         {activeSettings.showReferenceBox && currentSlide.type === 'scripture' && ( <div className="fixed bottom-12 left-1/2 -translate-x-1/2 px-8 py-4 rounded-2xl shadow-2xl border border-white/10 backdrop-blur-3xl z-[1000]" style={{ backgroundColor: activeSettings.referenceBoxColor }}><p className="text-white font-black uppercase tracking-tighter text-2xl">{displayRef}</p></div> )}
         
         <AnimatePresence>
@@ -605,14 +737,13 @@ export default function App() {
           <div className={`flex ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-blue-900/20'} p-1 rounded-lg border ${uiTheme === 'light' ? 'border-slate-300' : 'border-blue-500/30'}`} title="Presentation Deck (.glidepres)"><button onClick={savePresentation} className={`p-2 ${uiBtnHover} rounded-md text-blue-400 hover:text-white`} title="SAVE PRESENTATION"><Save size={18} /></button><button onClick={loadPresentation} className={`p-2 ${uiBtnHover} rounded-md text-blue-400 hover:text-white`} title="LOAD PRESENTATION"><FolderOpen size={18} /></button></div>
           <div className={`w-px h-4 ${uiTheme === 'light' ? 'bg-slate-300' : 'bg-slate-700'} mx-1 self-center`} />
           <div className={`flex ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-800/50'} p-1 rounded-lg border ${uiBorder}`}><button onClick={() => addSlide('scripture')} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-amber-500`} title="ADD SCRIPTURE SLIDE"><Book size={18} /></button><button onClick={() => addSlide('image')} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-blue-500`} title="ADD IMAGE SLIDE"><ImageIcon size={18} /></button><button onClick={() => addSlide('video')} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-purple-500`} title="ADD VIDEO SLIDE"><Film size={18} /></button><button onClick={() => addSlide('graphic')} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-emerald-500`} title="ADD GRAPHIC SLIDE"><Code size={18} /></button><div className={`w-px h-4 ${uiTheme === 'light' ? 'bg-slate-300' : 'bg-slate-700'} mx-1 self-center`} /><button onClick={saveStudy} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-amber-600`} title="SAVE SCRIPTURE MARKUP"><Save size={18} /></button><button onClick={loadStudy} className={`p-2 ${uiBtnHover} rounded-md ${uiTextMuted} hover:text-blue-600`} title="LOAD SCRIPTURE MARKUP"><FolderOpen size={18} /></button></div>
-          <select value={translation} onChange={(e) => { const val = e.target.value; setTranslation(val); if (currentSlide.type === 'scripture') fetchBiblePassage(false, currentSlide.title, val); }} className={`h-10 ${uiTheme === 'light' ? 'bg-slate-100 border-slate-300 text-slate-700' : 'bg-slate-800 border-slate-700 text-white'} border rounded-lg px-3 text-xs font-bold outline-none focus:ring-1 focus:ring-amber-500`}>{TRANSLATIONS.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
           <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-300' : 'bg-slate-700'} mx-2`} /><button onClick={togglePresentation} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-widest transition-all ${isPresenting ? 'bg-red-500 text-white shadow-lg shadow-red-500/20' : 'bg-amber-600 text-white shadow-lg shadow-amber-600/20'}`}><Tv size={16} /> {isPresenting ? 'STOP' : 'PRESENT'}</button>
           <button onClick={() => setShowSettings(!showSettings)} className={`p-2 ${uiBtnHover} rounded-lg ${uiTextMuted}`}><Settings size={20} /></button>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <AnimatePresence>{showSidebar && ( <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 260, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className={`h-full border-r ${uiBorder} flex flex-col flex-shrink-0 bg-slate-900`}><div className="p-4 flex justify-between items-center border-b border-white/5"><span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">SLIDE DECK</span><span className="text-[10px] font-mono text-slate-600">{slides.length} slides</span></div><div className="flex-1 overflow-y-auto p-3 space-y-3 no-scrollbar">{slides.map((slide, index) => ( <div key={slide.id} onClick={() => { setCurrentSlideIndex(index); setTimeout(() => syncStateToStorage(), 50); }} className={`group relative aspect-video rounded-xl border-2 transition-all cursor-pointer overflow-hidden ${currentSlideIndex === index ? 'border-amber-500 ring-4 ring-amber-500/20' : uiTheme === 'light' ? 'border-slate-200 hover:border-slate-400' : 'border-slate-800 hover:border-slate-600'}`}><ThumbnailRenderer slide={slide} settings={settings} activeFont={activeFont} /><div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent"><p className="text-[10px] font-bold truncate text-white uppercase">{slide.title}</p></div><button onClick={(e) => { e.stopPropagation(); removeSlide(index); }} className="absolute top-1 right-1 p-1 bg-red-500/80 text-white rounded-md opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={12} /></button><div className="absolute top-1 left-1 w-5 h-5 rounded bg-black/50 text-[10px] flex items-center justify-center font-bold text-white/50">{index + 1}</div></div> ))}<button onClick={() => setShowAddSlideModal(true)} className={`w-full py-4 border-2 border-dashed ${uiTheme === 'light' ? 'border-slate-300 text-slate-400 hover:border-amber-500 hover:text-amber-600' : 'border-slate-800 text-slate-600 hover:border-amber-500 hover:text-amber-500'} rounded-xl flex flex-col items-center justify-center transition-all gap-2`}><Plus size={20} /><span className="text-[10px] font-bold uppercase tracking-widest">NEW SLIDE</span></button></div></motion.aside> )}</AnimatePresence>
+        <AnimatePresence>{showSidebar && ( <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 260, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className={`h-full border-r ${uiBorder} flex flex-col flex-shrink-0 ${uiTheme === 'light' ? 'bg-slate-50' : 'bg-slate-900'}`}><div className="p-4 flex justify-between items-center border-b border-white/5"><span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">SLIDE DECK</span><span className="text-[10px] font-mono text-slate-600">{slides.length} slides</span></div><div className="flex-1 overflow-y-auto p-3 space-y-3 no-scrollbar">{slides.map((slide, index) => ( <div key={slide.id} onClick={() => { setCurrentSlideIndex(index); syncStateToStorage({ slideIndex: index }); }} className={`group relative aspect-video rounded-xl border-2 transition-all cursor-pointer overflow-hidden ${currentSlideIndex === index ? 'border-amber-500 ring-4 ring-amber-500/20' : uiTheme === 'light' ? 'border-slate-200 hover:border-slate-400' : 'border-slate-800 hover:border-slate-600'}`}><ThumbnailRenderer slide={slide} settings={settings} activeFont={activeFont} /><div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent"><p className="text-[10px] font-bold truncate text-white uppercase">{slide.title}</p></div><button onClick={(e) => { e.stopPropagation(); removeSlide(index); }} className="absolute top-1 right-1 p-1 bg-red-500/80 text-white rounded-md opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={12} /></button><div className="absolute top-1 left-1 w-5 h-5 rounded bg-black/50 text-[10px] flex items-center justify-center font-bold text-white/50">{index + 1}</div></div> ))}<button onClick={() => setShowAddSlideModal(true)} className={`w-full py-4 border-2 border-dashed ${uiTheme === 'light' ? 'border-slate-300 text-slate-400 hover:border-amber-500 hover:text-amber-600' : 'border-slate-800 text-slate-600 hover:border-amber-500 hover:text-amber-500'} rounded-xl flex flex-col items-center justify-center transition-all gap-2`}><Plus size={20} /><span className="text-[10px] font-bold uppercase tracking-widest">NEW SLIDE</span></button></div></motion.aside> )}</AnimatePresence>
         
         <main className={`flex-1 flex flex-col relative ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-black/20'}`}>
           <AnimatePresence>{showAddSlideModal && ( <div className="fixed inset-0 z-[200] flex items-center justify-center p-4"><motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowAddSlideModal(false)} className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" /><motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-slate-900 border border-slate-700 p-8 rounded-3xl shadow-2xl relative max-w-lg w-full"><h2 className="text-2xl font-black uppercase italic tracking-tighter mb-6 text-white text-center">ADD NEW SLIDE</h2><div className="grid grid-cols-2 gap-4"><button onClick={() => addSlide('scripture')} className="flex flex-col items-center gap-3 p-6 bg-slate-800 hover:bg-amber-600/20 border border-slate-700 hover:border-amber-500 rounded-2xl transition-all group"><Book size={32} className="text-amber-500 group-hover:scale-110 transition-transform" /><span className="text-xs font-bold uppercase tracking-widest text-slate-300 group-hover:text-white">SCRIPTURE</span></button><button onClick={() => addSlide('image')} className="flex flex-col items-center gap-3 p-6 bg-slate-800 hover:bg-blue-600/20 border border-slate-700 hover:border-blue-500 rounded-2xl transition-all group"><ImageIcon size={32} className="text-blue-500 group-hover:scale-110 transition-transform" /><span className="text-xs font-bold uppercase tracking-widest text-slate-300 group-hover:text-white">IMAGE FILE</span></button><button onClick={() => addSlide('video')} className="flex flex-col items-center gap-3 p-6 bg-slate-800 hover:bg-purple-600/20 border border-slate-700 hover:border-purple-500 rounded-2xl transition-all group"><Film size={32} className="text-purple-500 group-hover:scale-110 transition-transform" /><span className="text-xs font-bold uppercase tracking-widest text-slate-300 group-hover:text-white">VIDEO FILE</span></button><button onClick={() => addSlide('graphic')} className="flex flex-col items-center gap-3 p-6 bg-slate-800 hover:bg-emerald-600/20 border border-slate-700 hover:border-emerald-500 rounded-2xl transition-all group"><Code size={32} className="text-emerald-500 group-hover:scale-110 transition-transform" /><span className="text-xs font-bold uppercase tracking-widest text-slate-300 group-hover:text-white">HTML GRAPHIC</span></button></div><button onClick={() => setShowAddSlideModal(false)} className="mt-6 w-full py-3 text-slate-500 hover:text-white transition-colors text-xs font-bold uppercase tracking-widest">CANCEL</button></motion.div></div> )}</AnimatePresence>
@@ -623,36 +754,64 @@ export default function App() {
               
               {currentSlide.type === 'scripture' && ( <>
                   <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
-                  <div className="flex-1 flex flex-col"><label className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-1 px-1 flex justify-between items-center"><span>BIBLE REFERENCE</span>{fetchError && <span className="text-red-500 normal-case bg-red-500/10 px-2 py-0.5 rounded flex items-center gap-1"><XCircle size={10} /> {fetchError}</span>}</label><div className="flex gap-2"><input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className={`flex-1 h-9 ${uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-900' : 'bg-slate-800 border-slate-700 text-white'} border rounded-lg px-4 text-sm outline-none focus:ring-1 focus:ring-amber-500`} /><button onClick={() => fetchBiblePassage()} className="h-9 px-6 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-amber-600/20">{isLoading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />} FETCH</button></div></div>
+                  <div className="flex-1 flex flex-col"><label className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-1 px-1 flex justify-between items-center"><span>BIBLE REFERENCE & VERSION</span>{fetchError && <span className="text-red-500 normal-case bg-red-500/10 px-2 py-0.5 rounded flex items-center gap-1"><XCircle size={10} /> {fetchError}</span>}</label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={translation} 
+                        onChange={(e) => { const val = e.target.value; setTranslation(val); fetchBiblePassage(false, referenceInput, val); }} 
+                        className={`flex-1 h-10 ${uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-700' : 'bg-slate-800 border-slate-700 text-white'} border rounded-lg px-3 text-sm font-bold outline-none focus:ring-2 focus:ring-amber-500 shadow-sm transition-all`}
+                      >
+                        {TRANSLATIONS.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                      <input type="text" value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && fetchBiblePassage()} placeholder="Enter Bible Reference..." className={`flex-1 h-10 ${uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-900' : 'bg-slate-800 border-slate-700 text-white'} border rounded-lg px-4 text-sm outline-none focus:ring-2 focus:ring-amber-500 shadow-sm transition-all`} />
+                      <button onClick={() => fetchBiblePassage()} className="h-10 px-6 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-bold text-xs uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-amber-600/20 transition-all active:scale-95 flex-shrink-0">
+                        {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />} 
+                        <span>FETCH</span>
+                      </button>
+                    </div>
+                  </div>
                   <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1 self-end mb-1`} /><button onClick={() => setShowSlideSettings(!showSlideSettings)} className={`p-2 rounded-lg transition-all self-end mb-0.5 ${showSlideSettings ? 'bg-slate-700 text-white shadow-lg' : uiTheme === 'light' ? 'bg-slate-100 text-slate-500 hover:bg-slate-200' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`} title="SLIDE SETTINGS"><SlidersHorizontal size={20} /></button>
                 </> )}
               
               {currentSlide.type === 'image' && ( <>
                   <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
                   <div className="flex items-center gap-2 self-end mb-0.5">
-                    <div className="flex gap-1 bg-slate-800 p-1 rounded-xl">
-                      <button onClick={() => toggleImageTool('pen')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'pen' ? 'bg-blue-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`} title="PEN"><Pencil size={18} /></button>
-                      <button onClick={() => toggleImageTool('line')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'line' ? 'bg-blue-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`} title="LINE TOOL"><Minus size={18} /></button>
-                      <button onClick={() => toggleImageTool('circle')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'circle' ? 'bg-blue-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`} title="CIRCLE"><Circle size={18} /></button>
-                      <button onClick={() => toggleImageTool('rect')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'rect' ? 'bg-blue-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`} title="RECTANGLE"><Square size={18} /></button>
-                      <button onClick={() => toggleImageTool('eraser')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'eraser' ? 'bg-blue-500 text-white' : 'text-slate-400 hover:bg-slate-700'}`} title="ERASER"><Eraser size={18} /></button>
+                    <div className={`flex gap-1 ${uiTheme === 'light' ? 'bg-slate-100' : 'bg-slate-800'} p-1 rounded-xl`}>
+                      <button onClick={() => toggleImageTool('pen')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'pen' ? 'bg-blue-500 text-white' : `${uiTextMuted} hover:bg-slate-200`}`} title="PEN"><Pencil size={18} /></button>
+                      <button onClick={() => toggleImageTool('line')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'line' ? 'bg-blue-500 text-white' : `${uiTextMuted} hover:bg-slate-200`}`} title="LINE TOOL"><Minus size={18} /></button>
+                      <button onClick={() => toggleImageTool('circle')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'circle' ? 'bg-blue-500 text-white' : `${uiTextMuted} hover:bg-slate-200`}`} title="CIRCLE"><Circle size={18} /></button>
+                      <button onClick={() => toggleImageTool('rect')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'rect' ? 'bg-blue-500 text-white' : `${uiTextMuted} hover:bg-slate-200`}`} title="RECTANGLE"><Square size={18} /></button>
+                      <button onClick={() => toggleImageTool('eraser')} className={`p-2 rounded-lg ${imageActiveTool?.type === 'eraser' ? 'bg-blue-500 text-white' : `${uiTextMuted} hover:bg-slate-200`}`} title="ERASER"><Eraser size={18} /></button>
                     </div>
-                    <div className="w-px h-6 bg-slate-700 mx-1" />
+                    <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
                     <div className="flex flex-col items-center px-2">
                       <label className="text-[7px] font-bold text-slate-500 uppercase mb-0.5">SIZE</label>
-                      <input type="range" min="1" max="20" value={imagePenSize} onChange={(e) => setImagePenSize(parseInt(e.target.value))} className="w-20 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+                      <input type="range" min="1" max="20" value={imagePenSize} onChange={(e) => setImagePenSize(parseInt(e.target.value))} className={`w-20 h-1 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} rounded-lg appearance-none cursor-pointer accent-blue-500`} />
                     </div>
-                    <div className="w-px h-6 bg-slate-700 mx-1" />
+                    <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
                     <div className="flex gap-1.5 px-1 items-center">
                       {['#ef4444', '#10b981', '#3b82f6', '#ffffff'].map(c => (<button key={c} onClick={() => setImageActiveColor(c)} className={`w-5 h-5 rounded-full border-2 ${imageActiveColor === c ? 'border-blue-500' : 'border-transparent'}`} style={{ backgroundColor: c }} />))}
-                      <div className="w-px h-4 bg-slate-700 mx-1" />
+                      <div className={`w-px h-4 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
                       <div className="relative w-7 h-7 flex items-center justify-center">
-                        <Palette size={18} className={imageActiveColor ? 'text-blue-500' : 'text-slate-400'} />
+                        <Palette size={18} className={imageActiveColor ? 'text-blue-500' : uiTextMuted} />
                         <input type="color" value={imageActiveColor} onChange={(e) => setImageActiveColor(e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                       </div>
                     </div>
-                    <div className="w-px h-6 bg-slate-700 mx-1" />
-                    <button onClick={clearAllFormatting} className="p-2 text-slate-400 hover:text-red-500 transition-colors" title="CLEAR ALL MARKUPS"><RotateCcw size={18} /></button>
+                    <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
+                    <button onClick={() => {
+                      const val = !currentSlide.fillScreen;
+                      setSlides(prev => {
+                        const nextSlides = [...prev];
+                        if (nextSlides[currentSlideIndex]) nextSlides[currentSlideIndex] = { ...nextSlides[currentSlideIndex], fillScreen: val };
+                        syncStateToStorage({ slides: nextSlides });
+                        return nextSlides;
+                      });
+                    }} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-widest transition-all ${currentSlide.fillScreen ? 'bg-amber-500/10 border-amber-500 text-amber-500' : (uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-white')}`} title="FILL SCREEN">
+                      <ScreenShare size={14} />
+                      <span>FILL SCREEN</span>
+                    </button>
+                    <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
+                    <button onClick={clearAllFormatting} className={`p-2 ${uiTextMuted} hover:text-red-500 transition-colors`} title="CLEAR ALL MARKUPS"><RotateCcw size={18} /></button>
                   </div>
                 </> )}
             </div>
@@ -663,11 +822,33 @@ export default function App() {
           <AnimatePresence mode="wait"><SlideTransitionWrapper key={currentSlide.id} transition={activeSettings.slideTransition} slideId={currentSlide.id}><SlideRenderer slide={currentSlide} settings={activeSettings} activeFont={activeFont} activeVerseIndex={activeVerseIndex} verses={verses} isControl={true} containerRef={containerRef} applyActiveTool={applyActiveTool} translation={translation} activeTool={currentSlide.type === 'scripture' ? activeTool : imageActiveTool} activeColor={currentSlide.type === 'scripture' ? activeMarkupColor : imageActiveColor} updateSlideMarkups={updateSlideMarkups} penSize={imagePenSize} onMarkupUpdate={broadcastLiveMarkup} /></SlideTransitionWrapper></AnimatePresence>
 
           {currentSlide.type === 'scripture' && (
-            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-slate-900 border border-slate-700 p-2 rounded-2xl shadow-2xl z-50">
-              <div className="flex gap-1 bg-slate-800 p-1 rounded-xl"><button onClick={() => { setActiveVerseIndex(prev => { const next = Math.max(0, prev - activeSettings.verseCount); syncStateToStorage({ index: next }); return next; }); }} className="p-3 rounded-lg text-slate-400 hover:bg-slate-700 hover:text-white transition-all" title="PREVIOUS VERSE"><ChevronUp size={20} /></button><button onClick={() => { setActiveVerseIndex(prev => { const next = Math.min(prev + activeSettings.verseCount, verses.length - 1); syncStateToStorage({ index: next }); return next; }); }} className="p-3 rounded-lg text-slate-400 hover:bg-slate-700 hover:text-white transition-all" title="NEXT VERSE"><ChevronDown size={20} /></button></div>
-              <div className="w-px h-8 bg-slate-700 mx-1" /><div className="flex gap-1 bg-slate-800 p-1 rounded-xl"><button onClick={() => toggleTool('backColor', hexToRgba(activeMarkupColor, 0.4))} className={`p-3 rounded-lg ${activeTool?.type === 'backColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="HIGHLIGHT"><Highlighter size={18} /></button><button onClick={() => toggleTool('underlineColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'underlineColor' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="UNDERLINE"><UnderlineIcon size={18} /></button><button onClick={() => toggleTool('bold')} className={`p-3 rounded-lg ${activeTool?.type === 'bold' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="BOLD"><BoldIcon size={18} /></button><button onClick={() => toggleTool('italic')} className={`p-3 rounded-lg ${activeTool?.type === 'italic' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="ITALIC"><Italic size={18} /></button><button onClick={() => toggleTool('eraser')} className={`p-3 rounded-lg ${activeTool?.type === 'eraser' ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:bg-slate-700'}`} title="SURGICAL ERASER"><Eraser size={18} /></button></div>
-              <div className="w-px h-8 bg-slate-700" /><div className="flex gap-2 px-2 items-center">{['#facc15', '#10b981', '#3b82f6', '#ef4444'].map(c => (<button key={c} onClick={() => { setActiveMarkupColor(c); if(activeTool?.type === 'backColor') toggleTool('backColor', hexToRgba(c, 0.4)); else if(activeTool?.type === 'underlineColor' || activeTool?.type === 'foreColor') toggleTool(activeTool.type, c); }} className={`w-6 h-6 rounded-full border-2 ${activeMarkupColor === c ? 'border-amber-500' : 'border-transparent'}`} style={{ backgroundColor: c }} />))}<div className="w-px h-6 bg-slate-700 mx-1" /><div className="relative w-8 h-8 flex items-center justify-center"><Palette size={20} className={activeMarkupColor ? 'text-amber-500' : 'text-slate-400'} /><input type="color" value={activeMarkupColor} onChange={(e) => { const c = e.target.value; setActiveMarkupColor(c); if(activeTool?.type === 'backColor') toggleTool('backColor', hexToRgba(c, 0.4)); else if(activeTool?.type === 'underlineColor' || activeTool?.type === 'foreColor') toggleTool(activeTool.type, c); }} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" /></div></div>
-              <div className="w-px h-8 bg-slate-700 mx-1" /><button onClick={clearAllFormatting} className="p-3 text-slate-400 hover:text-red-500 transition-colors" title="CLEAR ALL FORMATTING"><RotateCcw size={18} /></button>
+            <div className={`absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 ${uiTheme === 'light' ? 'bg-white border-slate-300' : 'bg-slate-900 border-slate-700'} border p-2 rounded-2xl shadow-2xl z-50`}>
+              <div className={`flex gap-1 ${uiTheme === 'light' ? 'bg-slate-100' : 'bg-slate-800'} p-1 rounded-xl`}>
+                <button onClick={() => { setActiveVerseIndex(prev => { const next = Math.max(0, prev - activeSettings.verseCount); syncStateToStorage({ index: next }); return next; }); }} className={`p-3 rounded-lg ${uiTextMuted} hover:bg-amber-500/10 hover:text-amber-600 transition-all`} title="PREVIOUS VERSE"><ChevronUp size={20} /></button>
+                <button onClick={() => { setActiveVerseIndex(prev => { const next = Math.min(prev + activeSettings.verseCount, verses.length - 1); syncStateToStorage({ index: next }); return next; }); }} className={`p-3 rounded-lg ${uiTextMuted} hover:bg-amber-500/10 hover:text-amber-600 transition-all`} title="NEXT VERSE"><ChevronDown size={20} /></button>
+              </div>
+              <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
+              <div className={`flex gap-1 ${uiTheme === 'light' ? 'bg-slate-100' : 'bg-slate-800'} p-1 rounded-xl`}>
+                <button onClick={() => toggleTool('backColor', hexToRgba(activeMarkupColor, 0.4))} className={`p-3 rounded-lg ${activeTool?.type === 'backColor' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="HIGHLIGHT"><Highlighter size={18} /></button>
+                <button onClick={() => toggleTool('foreColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'foreColor' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="TEXT COLOR"><Type size={18} /></button>
+                <button onClick={() => toggleTool('underlineColor', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'underlineColor' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="UNDERLINE"><UnderlineIcon size={18} /></button>
+                <button onClick={() => toggleTool('circle', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'circle' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="CIRCLE"><Circle size={18} /></button>
+                <button onClick={() => toggleTool('rect', activeMarkupColor)} className={`p-3 rounded-lg ${activeTool?.type === 'rect' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="BOX"><Square size={18} /></button>
+                <button onClick={() => toggleTool('bold')} className={`p-3 rounded-lg ${activeTool?.type === 'bold' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="BOLD"><BoldIcon size={18} /></button>
+                <button onClick={() => toggleTool('italic')} className={`p-3 rounded-lg ${activeTool?.type === 'italic' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="ITALIC"><Italic size={18} /></button>
+                <button onClick={() => toggleTool('eraser')} className={`p-3 rounded-lg ${activeTool?.type === 'eraser' ? 'bg-amber-500 text-slate-900' : `${uiTextMuted} hover:bg-slate-200`}`} title="SURGICAL ERASER"><Eraser size={18} /></button>
+              </div>
+              <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'}`} />
+              <div className="flex gap-2 px-2 items-center">
+                {['#facc15', '#10b981', '#3b82f6', '#ef4444'].map(c => (<button key={c} onClick={() => { setActiveMarkupColor(c); if(activeTool?.type === 'backColor') toggleTool('backColor', hexToRgba(c, 0.4)); else if(activeTool?.type === 'underlineColor' || activeTool?.type === 'foreColor') toggleTool(activeTool.type, c); }} className={`w-6 h-6 rounded-full border-2 ${activeMarkupColor === c ? 'border-amber-500' : 'border-transparent'}`} style={{ backgroundColor: c }} />))}
+                <div className={`w-px h-6 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
+                <div className="relative w-8 h-8 flex items-center justify-center">
+                  <Palette size={20} className={activeMarkupColor ? 'text-amber-500' : uiTextMuted} />
+                  <input type="color" value={activeMarkupColor} onChange={(e) => { const c = e.target.value; setActiveMarkupColor(c); if(activeTool?.type === 'backColor') toggleTool('backColor', hexToRgba(c, 0.4)); else if(activeTool?.type === 'underlineColor' || activeTool?.type === 'foreColor') toggleTool(activeTool.type, c); }} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                </div>
+              </div>
+              <div className={`w-px h-8 ${uiTheme === 'light' ? 'bg-slate-200' : 'bg-slate-700'} mx-1`} />
+              <button onClick={clearAllFormatting} className={`p-3 ${uiTextMuted} hover:text-red-500 transition-colors`} title="CLEAR ALL FORMATTING"><RotateCcw size={18} /></button>
             </div>
           )}
         </main>
@@ -681,22 +862,22 @@ export default function App() {
             <div className="space-y-6 overflow-y-auto no-scrollbar pb-12">
               <div className="space-y-3">
                 <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">INTERFACE THEME</h4>
-                <div className="flex gap-2 p-1 bg-slate-800 rounded-lg border border-slate-700">
+                <div className={`flex gap-2 p-1 ${uiTheme === 'light' ? 'bg-slate-100 border-slate-200' : 'bg-slate-800 border-slate-700'} rounded-lg border`}>
                   <button onClick={() => setSettings({...settings, uiTheme: 'light'})} className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${settings.uiTheme === 'light' ? 'bg-white text-slate-900 shadow-md' : 'text-slate-400 hover:text-white'}`}>LIGHT</button>
                   <button onClick={() => setSettings({...settings, uiTheme: 'dark'})} className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${settings.uiTheme === 'dark' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}>DARK</button>
                 </div>
               </div>
               {isTauriApp && availableMonitors.length > 1 && (
-                <div className="space-y-3 pt-4 border-t border-white/5">
+                <div className={`space-y-3 pt-4 border-t ${uiTheme === 'light' ? 'border-slate-100' : 'border-white/5'}`}>
                   <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">TARGET DISPLAY</h4>
-                  <select value={settings.targetMonitor} onChange={(e) => setSettings({...settings, targetMonitor: parseInt(e.target.value)})} className="w-full bg-slate-800 border border-slate-700 p-2 rounded-lg text-xs outline-none">{availableMonitors.map((m, i) => <option key={i} value={i}>{m.name || `DISPLAY ${i + 1}`}</option>)}</select>
+                  <select value={settings.targetMonitor} onChange={(e) => setSettings({...settings, targetMonitor: parseInt(e.target.value)})} className={`w-full ${uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-700' : 'bg-slate-800 border-slate-700 text-white'} border p-2 rounded-lg text-xs outline-none shadow-sm`}>{availableMonitors.map((m, i) => <option key={i} value={i}>{m.name || `DISPLAY ${i + 1}`}</option>)}</select>
                 </div>
               )}
-              <div className="space-y-3 pt-4 border-t border-white/5">
+              <div className={`space-y-3 pt-4 border-t ${uiTheme === 'light' ? 'border-slate-100' : 'border-white/5'}`}>
                 <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">SLIDE TRANSITION</h4>
-                <div className="grid grid-cols-2 gap-2">{['none', 'fade', 'slide', 'zoom'].map(t => (<button key={t} onClick={() => setSettings({...settings, slideTransition: t as any})} className={`py-2 text-[10px] font-bold rounded-md border transition-all uppercase tracking-widest ${settings.slideTransition === t ? 'bg-amber-500 border-amber-400 text-slate-900 shadow-lg' : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500 hover:text-white'}`}>{t}</button>))}</div>
+                <div className="grid grid-cols-2 gap-2">{['none', 'fade', 'slide', 'zoom'].map(t => (<button key={t} onClick={() => setSettings({...settings, slideTransition: t as any})} className={`py-2 text-[10px] font-bold rounded-md border transition-all uppercase tracking-widest ${settings.slideTransition === t ? 'bg-amber-500 border-amber-400 text-slate-900 shadow-lg' : (uiTheme === 'light' ? 'bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500 hover:text-white')}`}>{t}</button>))}</div>
               </div>
-              <div className="space-y-3 pt-6 border-t border-white/5"><button onClick={() => checkForUpdates(true)} className={`w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all bg-slate-800 text-slate-400 hover:bg-slate-700`}>CHECK FOR UPDATES</button></div>
+              <div className={`space-y-3 pt-6 border-t ${uiTheme === 'light' ? 'border-slate-100' : 'border-white/5'}`}><button onClick={() => checkForUpdates(true)} className={`w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all ${uiTheme === 'light' ? 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-900 border border-slate-200 shadow-sm' : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'}`}>CHECK FOR UPDATES</button></div>
             </div>
           </motion.div>
         </div>
